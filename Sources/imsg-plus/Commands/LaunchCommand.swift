@@ -49,13 +49,13 @@ enum LaunchCommand {
     let quiet = values.flags.contains("quiet")
     let customDylib = values.option("dylib")
 
-    let launcher = MessagesLauncher.shared
+    let bridge = IMCoreBridge.shared
 
     // Kill Messages.app
     if !quiet && !runtime.jsonOutput {
       print("🔄 Killing Messages.app...")
     }
-    launcher.killMessages()
+    bridge.killMessages()
 
     if killOnly {
       // Wait briefly for termination
@@ -97,8 +97,8 @@ enum LaunchCommand {
       throw IMsgError.invalidArgument("dylib not found")
     }
 
-    // Set the dylib path on the launcher
-    launcher.dylibPath = resolvedPath
+    // Set the dylib path on the bridge
+    bridge.dylibPath = resolvedPath
 
     if !quiet && !runtime.jsonOutput {
       print("📦 Using dylib: \(resolvedPath)")
@@ -114,7 +114,7 @@ enum LaunchCommand {
 
     // Use ensureRunning which handles the full lifecycle
     do {
-      try launcher.ensureRunning()
+      try bridge.ensureRunning()
 
       if runtime.jsonOutput {
         let output: [String: Any] = [

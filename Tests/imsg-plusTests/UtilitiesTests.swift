@@ -95,16 +95,8 @@ func outputModelsEncodeExpectedKeys() throws {
     originalPath: "/tmp/file.dat",
     missing: false
   )
-  let reaction = Reaction(
-    rowID: 99,
-    reactionType: .like,
-    sender: "+123",
-    isFromMe: true,
-    date: Date(timeIntervalSince1970: 2),
-    associatedMessageID: 7
-  )
   let messagePayload = MessagePayload(
-    message: message, attachments: [attachment], reactions: [reaction])
+    message: message, attachments: [attachment])
   let messageData = try JSONEncoder().encode(messagePayload)
   let messageObject = try JSONSerialization.jsonObject(with: messageData) as? [String: Any]
   #expect(messageObject?["chat_id"] as? Int64 == 1)

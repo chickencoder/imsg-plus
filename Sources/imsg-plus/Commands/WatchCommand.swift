@@ -83,11 +83,9 @@ enum WatchCommand {
       }
       if runtime.jsonOutput {
         let attachments = try store.attachments(for: message.rowID)
-        let reactions = try store.reactions(for: message.rowID)
         let payload = MessagePayload(
           message: message,
-          attachments: attachments,
-          reactions: reactions
+          attachments: attachments
         )
         try JSONLines.print(payload)
         continue

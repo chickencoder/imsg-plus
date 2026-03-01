@@ -227,8 +227,6 @@ final class RPCServer {
         try await handleTypingSet(params: params, id: id)
       case "messages.markRead":
         try await handleMarkRead(params: params, id: id)
-      case "tapback.send":
-        try await handleTapbackSend(params: params, id: id)
       default:
         output.sendError(id: id, error: RPCError.methodNotFound(method))
       }
@@ -383,38 +381,6 @@ final class RPCServer {
     respond(id: id, result: ["ok": true])
   }
 
-  private func handleTapbackSend(params: [String: Any], id: Any?) async throws {
-    guard let handle = stringParam(params["handle"]), !handle.isEmpty else {
-      throw RPCError.invalidParams("handle is required")
-    }
-    guard let guid = stringParam(params["guid"]), !guid.isEmpty else {
-      throw RPCError.invalidParams("guid is required (message GUID to react to)")
-    }
-    guard let typeStr = stringParam(params["type"]), !typeStr.isEmpty else {
-      throw RPCError.invalidParams(
-        "type is required (love, thumbsup, thumbsdown, haha, emphasis, question)")
-    }
-    let remove = boolParam(params["remove"]) ?? false
-    guard let tapbackType = TapbackType.from(string: typeStr, remove: remove) else {
-      throw RPCError.invalidParams(
-        "invalid reaction type: '\(typeStr)'. Valid: love, thumbsup, thumbsdown, haha, emphasis, question"
-      )
-    }
-    guard bridgeAvailable else {
-      throw RPCError.internalError("IMCoreBridge not available")
-    }
-    try await IMCoreBridge.shared.sendTapback(to: handle, messageGUID: guid, type: tapbackType)
-    respond(
-      id: id,
-      result: [
-        "ok": true,
-        "handle": handle,
-        "guid": guid,
-        "type": tapbackType.displayName,
-        "action": remove ? "removed" : "added",
-      ])
-  }
-
   /// Resolve the best handle for typing/read from send params
   private func resolveTypingHandle(recipient: String, chatIdentifier: String, chatGUID: String)
     -> String?
@@ -436,13 +402,11 @@ private func buildMessagePayload(
   let chatInfo = try cache.info(chatID: message.chatID)
   let participants = try cache.participants(chatID: message.chatID)
   let attachments = includeAttachments ? try store.attachments(for: message.rowID) : []
-  let reactions = includeAttachments ? try store.reactions(for: message.rowID) : []
   return messagePayload(
     message: message,
     chatInfo: chatInfo,
     participants: participants,
-    attachments: attachments,
-    reactions: reactions
+    attachments: attachments
   )
 }
 

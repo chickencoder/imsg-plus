@@ -17,10 +17,8 @@ struct CommandRouter {
       RpcCommand.spec,
       TypingCommand.spec,
       ReadCommand.spec,
-      ReactCommand.spec,
       StatusCommand.spec,
       LaunchCommand.spec,
-      WatchdogCommand.spec,
     ]
     let descriptor = CommandDescriptor(
       name: rootName,

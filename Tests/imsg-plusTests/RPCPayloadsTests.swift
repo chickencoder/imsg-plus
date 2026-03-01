@@ -61,20 +61,11 @@ func messagePayloadIncludesChatFields() {
     originalPath: "/tmp/file.dat",
     missing: false
   )
-  let reaction = Reaction(
-    rowID: 99,
-    reactionType: .like,
-    sender: "+123",
-    isFromMe: false,
-    date: Date(timeIntervalSince1970: 2),
-    associatedMessageID: 5
-  )
   let payload = messagePayload(
     message: message,
     chatInfo: chatInfo,
     participants: ["+111"],
-    attachments: [attachment],
-    reactions: [reaction]
+    attachments: [attachment]
   )
   #expect(payload["chat_id"] as? Int64 == 10)
   #expect(payload["guid"] as? String == "msg-guid-5")
@@ -83,9 +74,6 @@ func messagePayloadIncludesChatFields() {
   #expect(payload["chat_name"] as? String == "Group")
   #expect(payload["is_group"] as? Bool == true)
   #expect((payload["attachments"] as? [[String: Any]])?.count == 1)
-  #expect(
-    (payload["reactions"] as? [[String: Any]])?.first?["emoji"] as? String
-      == ReactionType.like.emoji)
 }
 
 @Test
@@ -107,8 +95,7 @@ func messagePayloadOmitsEmptyReplyToGuid() {
     message: message,
     chatInfo: nil,
     participants: [],
-    attachments: [],
-    reactions: []
+    attachments: []
   )
   #expect(payload["reply_to_guid"] == nil)
   #expect(payload["guid"] as? String == "msg-guid-6")

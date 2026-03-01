@@ -29,7 +29,6 @@ enum StatusCommand {
         "advanced_features": availability.available,
         "typing_indicators": availability.available,
         "read_receipts": availability.available,
-        "tapback_reactions": availability.available,
         "message": availability.message,
       ]
       print(JSONSerialization.string(from: output))
@@ -40,14 +39,13 @@ enum StatusCommand {
       print("Basic features (send, receive, history):")
       print("  ✅ Available")
       print()
-      print("Advanced features (typing, read receipts, reactions):")
+      print("Advanced features (typing indicators, read receipts):")
       if availability.available {
         print("  ✅ Available - IMCore framework loaded")
         print()
         print("Available commands:")
         print("  • imsg-plus typing <handle> <state>")
         print("  • imsg-plus read <handle>")
-        print("  • imsg-plus react <handle> <guid> <type>")
       } else {
         print("  ⚠️  Not available")
         print()

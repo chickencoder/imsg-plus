@@ -6,7 +6,6 @@ enum WatchEventType: String, Codable {
   case typing
   case read
   case delivered
-  case reaction
 }
 
 protocol WatchEvent: Codable {
@@ -25,9 +24,8 @@ struct MessageEvent: WatchEvent {
   let isFromMe: Bool
   let text: String
   let attachments: [AttachmentPayload]
-  let reactions: [ReactionPayload]
 
-  init(message: Message, attachments: [AttachmentMeta], reactions: [Reaction]) {
+  init(message: Message, attachments: [AttachmentMeta]) {
     self.timestamp = CLIISO8601.format(Date())
     self.id = message.rowID
     self.chatID = message.chatID
@@ -37,7 +35,6 @@ struct MessageEvent: WatchEvent {
     self.isFromMe = message.isFromMe
     self.text = message.text
     self.attachments = attachments.map { AttachmentPayload(meta: $0) }
-    self.reactions = reactions.map { ReactionPayload(reaction: $0) }
   }
 
   enum CodingKeys: String, CodingKey {
@@ -51,7 +48,6 @@ struct MessageEvent: WatchEvent {
     case isFromMe = "is_from_me"
     case text
     case attachments
-    case reactions
   }
 }
 
@@ -121,31 +117,3 @@ struct DeliveredEvent: WatchEvent {
   }
 }
 
-struct ReactionEvent: WatchEvent {
-  let type = WatchEventType.reaction
-  let timestamp: String
-  let sender: String
-  let messageGUID: String
-  let reaction: String
-  let emoji: String
-  let added: Bool
-
-  init(sender: String, messageGUID: String, reaction: String, emoji: String, added: Bool) {
-    self.timestamp = CLIISO8601.format(Date())
-    self.sender = sender
-    self.messageGUID = messageGUID
-    self.reaction = reaction
-    self.emoji = emoji
-    self.added = added
-  }
-
-  enum CodingKeys: String, CodingKey {
-    case type
-    case timestamp
-    case sender
-    case messageGUID = "message_guid"
-    case reaction
-    case emoji
-    case added
-  }
-}

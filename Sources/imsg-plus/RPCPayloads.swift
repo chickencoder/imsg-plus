@@ -26,8 +26,7 @@ func messagePayload(
   message: Message,
   chatInfo: ChatInfo?,
   participants: [String],
-  attachments: [AttachmentMeta],
-  reactions: [Reaction]
+  attachments: [AttachmentMeta]
 ) -> [String: Any] {
   let identifier = chatInfo?.identifier ?? ""
   let guid = chatInfo?.guid ?? ""
@@ -41,7 +40,6 @@ func messagePayload(
     "text": message.text,
     "created_at": CLIISO8601.format(message.date),
     "attachments": attachments.map { attachmentPayload($0) },
-    "reactions": reactions.map { reactionPayload($0) },
     "chat_identifier": identifier,
     "chat_guid": guid,
     "chat_name": name,
@@ -64,17 +62,6 @@ func attachmentPayload(_ meta: AttachmentMeta) -> [String: Any] {
     "is_sticker": meta.isSticker,
     "original_path": meta.originalPath,
     "missing": meta.missing,
-  ]
-}
-
-func reactionPayload(_ reaction: Reaction) -> [String: Any] {
-  return [
-    "id": reaction.rowID,
-    "type": reaction.reactionType.name,
-    "emoji": reaction.reactionType.emoji,
-    "sender": reaction.sender,
-    "is_from_me": reaction.isFromMe,
-    "created_at": CLIISO8601.format(reaction.date),
   ]
 }
 
