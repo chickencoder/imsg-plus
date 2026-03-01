@@ -1,5 +1,6 @@
 import Carbon
 import Foundation
+import PhoneNumberKit
 
 public enum MessageService: String, Sendable, CaseIterable {
   case auto
@@ -242,6 +243,21 @@ public struct MessageSender {
       let data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
       let message = String(data: data, encoding: .utf8) ?? "Unknown osascript error"
       throw IMsgError.appleScriptFailure(message.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+  }
+}
+
+// MARK: - Phone Number Normalization
+
+final class PhoneNumberNormalizer {
+  private let phoneNumberUtility = PhoneNumberUtility()
+
+  func normalize(_ input: String, region: String) -> String {
+    do {
+      let number = try phoneNumberUtility.parse(input, withRegion: region, ignoreType: true)
+      return phoneNumberUtility.format(number, toType: .e164)
+    } catch {
+      return input
     }
   }
 }
