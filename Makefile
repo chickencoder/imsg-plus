@@ -1,89 +1,59 @@
 SHELL := /bin/bash
 
-.PHONY: help format lint test build imsg-plus clean build-dylib build-helper install uninstall
+.PHONY: help build build-dylib build-helper dev test clean install uninstall
 
 help:
 	@printf "%s\n" \
-		"make format     - swift format in-place" \
-		"make lint       - swift format lint + swiftlint" \
-		"make test       - sync version, patch deps, run swift test" \
-		"make build      - universal release build into bin/" \
+		"make build       - compile TypeScript + build dylib" \
 		"make build-dylib - build injectable dylib for Messages.app" \
-		"make imsg-plus  - clean rebuild + run debug binary (ARGS=...)" \
-		"make install    - build release binary and install to /usr/local/bin" \
-		"make uninstall  - remove installed binary from /usr/local/bin" \
-		"make clean      - swift package clean"
-
-format:
-	swift format --in-place --recursive Sources Tests
-
-lint:
-	swift format lint --recursive Sources Tests
-	swiftlint
-
-test:
-	scripts/generate-version.sh
-	swift package resolve
-	scripts/patch-deps.sh
-	swift test
+		"make dev         - run CLI in development mode (ARGS=...)" \
+		"make test        - run tests" \
+		"make install     - install to /usr/local/bin" \
+		"make uninstall   - remove from /usr/local/bin" \
+		"make clean       - remove build artifacts"
 
 build: build-dylib
-	scripts/generate-version.sh
-	swift package resolve
-	scripts/patch-deps.sh
-	scripts/build-universal.sh
+	npm run build
 
 # Build injectable dylib for Messages.app (DYLD_INSERT_LIBRARIES)
 # Uses arm64e architecture to match Messages.app on Apple Silicon
 build-dylib:
-	@echo "Building imsg-plus-helper.dylib (injectable)..."
+	@echo "Building imsg-plus-helper.dylib..."
 	@mkdir -p .build/release
 	@clang -dynamiclib -arch arm64e -fobjc-arc \
 		-framework Foundation \
 		-o .build/release/imsg-plus-helper.dylib \
 		Sources/IMsgHelper/IMsgInjected.m
-	@echo "Built imsg-plus-helper.dylib successfully"
-	@echo "To test manually:"
-	@echo "  killall Messages 2>/dev/null; sleep 1"
-	@echo "  DYLD_INSERT_LIBRARIES=.build/release/imsg-plus-helper.dylib /System/Applications/Messages.app/Contents/MacOS/Messages &"
+	@echo "Built .build/release/imsg-plus-helper.dylib"
 
-# Legacy standalone helper (kept for backward compatibility)
+# Legacy standalone helper
 build-helper:
-	@echo "Building imsg-helper (standalone, Objective-C)..."
 	@mkdir -p .build/release
 	@clang -fobjc-arc -framework Foundation -o .build/release/imsg-helper Sources/IMsgHelper/main.m
-	@echo "Built imsg-helper successfully"
 
-imsg-plus: build-dylib
-	scripts/generate-version.sh
-	swift package resolve
-	scripts/patch-deps.sh
-	swift package clean
-	swift build -c debug --product imsg-plus
-	./.build/debug/imsg-plus $(ARGS)
+dev: build-dylib
+	npx tsx src/index.ts $(ARGS)
+
+test:
+	npx tsc --noEmit
 
 clean:
-	swift package clean
-	@rm -f .build/release/imsg-plus-helper.dylib
-	@rm -f .build/release/imsg-helper
+	rm -rf dist
+	rm -f .build/release/imsg-plus-helper.dylib
+	rm -f .build/release/imsg-helper
 
-install: build-dylib
-	@echo "Building release binary..."
-	scripts/generate-version.sh
-	swift package resolve
-	scripts/patch-deps.sh
-	swift build -c release --product imsg-plus
-	@echo "Installing imsg-plus to /usr/local/bin..."
+install: build build-dylib
 	@mkdir -p /usr/local/bin /usr/local/lib
-	@cp .build/release/imsg-plus /usr/local/bin/imsg-plus
 	@cp .build/release/imsg-plus-helper.dylib /usr/local/lib/imsg-plus-helper.dylib
-	@echo "✅ Installed! You can now run 'imsg-plus' from anywhere"
+	@ln -sf $$(pwd)/dist/index.js /usr/local/bin/imsg-plus
+	@chmod +x /usr/local/bin/imsg-plus
+	@echo "Installed. Run 'imsg-plus' from anywhere."
 	@echo ""
-	@echo "To enable advanced features (typing, read receipts, tapbacks):"
-	@echo "  1. Disable SIP (System Integrity Protection)"
-	@echo "  2. Launch Messages with injection: imsg-plus launch"
+	@echo "To enable typing/read receipts:"
+	@echo "  1. Disable SIP"
+	@echo "  2. imsg-plus launch"
 
 uninstall:
-	@echo "Removing imsg-plus from /usr/local/bin..."
 	@rm -f /usr/local/bin/imsg-plus
-	@echo "✅ Uninstalled"
+	@rm -f /usr/local/lib/imsg-plus-helper.dylib
+	@echo "Uninstalled."

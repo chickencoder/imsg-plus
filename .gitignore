@@ -40,5 +40,8 @@ Package.resolved
 # Build artifacts
 bin/
 
-# Node.js / pnpm
+# Node.js
+node_modules/
+dist/
 pnpm-lock.yaml
+package-lock.json
