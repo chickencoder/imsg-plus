@@ -1,4 +1,4 @@
-import { watch as fsWatch, type FSWatcher } from "node:fs"
+import { watch as fsWatch } from "node:fs"
 import type { DB } from "./db.js"
 import type { Message, Filter } from "./types.js"
 
@@ -25,7 +25,7 @@ export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Me
 
   // Watch the db files for changes, resolve a promise on each change
   let notify: (() => void) | null = null
-  const watchers: FSWatcher[] = []
+  const watchers: ReturnType<typeof fsWatch>[] = []
 
   for (const suffix of ["", "-wal", "-shm"]) {
     try {

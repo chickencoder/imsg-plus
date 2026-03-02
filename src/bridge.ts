@@ -42,117 +42,92 @@ export function createBridge(customDylib?: string) {
     return await command("status", {})
   }
 
-  function launch(opts: { killOnly?: boolean; quiet?: boolean } = {}): void {
+  function launch(opts: { quiet?: boolean } = {}): void {
     kill()
-    if (opts.killOnly) return
 
     if (!dylibPath || !existsSync(dylibPath)) {
       throw new Error("imsg-plus-helper.dylib not found. Run: make build-dylib")
     }
 
-    // Clean IPC files
     for (const f of [COMMAND_FILE, RESPONSE_FILE, LOCK_FILE]) {
       try { unlinkSync(f) } catch {}
     }
 
-    // Launch Messages.app with dylib injection
-    const abs = resolve(dylibPath)
     const child = execFile(MESSAGES_BIN, [], {
-      env: { ...process.env, DYLD_INSERT_LIBRARIES: abs },
+      env: { ...process.env, DYLD_INSERT_LIBRARIES: resolve(dylibPath) },
     })
     child.unref()
 
-    // Wait for ready signal
-    if (!opts.quiet) {
-      waitForReady(15000)
-    }
+    if (!opts.quiet) waitForReady(15000)
   }
 
   function kill(): void {
     try {
       execFileSync("/usr/bin/killall", ["Messages"], { stdio: "ignore" })
     } catch {
-      // Not running — that's fine
+      // Not running
     }
   }
 
   async function command(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    ensureRunning()
+    // If the lock file is missing, the dylib isn't loaded — launch first
+    if (!existsSync(LOCK_FILE)) launch()
 
-    const cmd = { id: Date.now(), action, params }
-    writeFileSync(COMMAND_FILE, JSON.stringify(cmd))
+    const response = await sendAndWait(action, params)
+    if (response) return response
 
-    // Poll for response (dylib clears the command file when done)
-    const deadline = Date.now() + 10000
-    while (Date.now() < deadline) {
-      await sleep(50)
-
-      if (!existsSync(RESPONSE_FILE)) continue
-      const responseData = readFileSync(RESPONSE_FILE, "utf8").trim()
-      if (responseData.length < 3) continue
-
-      // Check that command file has been cleared (signals completion)
-      const cmdData = existsSync(COMMAND_FILE)
-        ? readFileSync(COMMAND_FILE, "utf8").trim()
-        : ""
-      if (cmdData.length > 2) continue
-
-      writeFileSync(RESPONSE_FILE, "")
-      const response = JSON.parse(responseData)
-
-      if (response.success) return response
-      const error = response.error ?? "Unknown dylib error"
-      throw new Error(error)
-    }
+    // Timed out — maybe the dylib died. Relaunch once and retry.
+    launch()
+    const retry = await sendAndWait(action, params)
+    if (retry) return retry
 
     throw new Error("Timeout waiting for dylib response")
   }
 
-  function ensureRunning(): void {
-    if (existsSync(LOCK_FILE)) {
-      // Quick ping to verify
-      try {
-        const cmd = { id: Date.now(), action: "ping", params: {} }
-        writeFileSync(COMMAND_FILE, JSON.stringify(cmd))
-        const deadline = Date.now() + 3000
-        while (Date.now() < deadline) {
-          sleepSync(50)
-          const responseData = existsSync(RESPONSE_FILE)
-            ? readFileSync(RESPONSE_FILE, "utf8").trim()
-            : ""
-          if (responseData.length < 3) continue
-          const cmdData = existsSync(COMMAND_FILE)
-            ? readFileSync(COMMAND_FILE, "utf8").trim()
-            : ""
-          if (cmdData.length > 2) continue
-          writeFileSync(RESPONSE_FILE, "")
-          return // It's alive
-        }
-      } catch {}
+  async function sendAndWait(action: string, params: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    writeFileSync(COMMAND_FILE, JSON.stringify({ id: Date.now(), action, params }))
+
+    const deadline = Date.now() + 10000
+    while (Date.now() < deadline) {
+      await sleep(50)
+
+      // Wait for dylib to write a response and clear the command file
+      const cmd = safeRead(COMMAND_FILE)
+      if (cmd) continue
+
+      const data = safeRead(RESPONSE_FILE)
+      if (!data) continue
+
+      writeFileSync(RESPONSE_FILE, "")
+      const response = JSON.parse(data)
+      if (response.success) return response
+      throw new Error(response.error ?? "Unknown dylib error")
     }
 
-    // Not running — launch it
-    launch()
+    return null
   }
 
   function waitForReady(timeout: number): void {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
-      if (existsSync(LOCK_FILE)) {
-        sleepSync(500)
-        return
-      }
+      if (existsSync(LOCK_FILE)) { sleepSync(500); return }
       sleepSync(500)
     }
     throw new Error("Timeout waiting for Messages.app. Ensure SIP is disabled.")
   }
 }
 
+// "Has meaningful JSON content?" — empty string, whitespace, or "{}" don't count
+function safeRead(path: string): string | null {
+  if (!existsSync(path)) return null
+  const data = readFileSync(path, "utf8").trim()
+  return data.length > 2 ? data : null
+}
+
 function findDylib(): string | null {
   for (const p of DYLIB_SEARCH) {
     if (existsSync(p)) return p
   }
-  // Check next to the binary
   const sibling = join(process.argv[1] ?? "", "..", "imsg-plus-helper.dylib")
   if (existsSync(sibling)) return sibling
   return null

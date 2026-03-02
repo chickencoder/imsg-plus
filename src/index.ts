@@ -9,7 +9,8 @@ import { send } from "./send.js"
 import { watch } from "./watch.js"
 import { createBridge } from "./bridge.js"
 import { serve } from "./rpc.js"
-import type { Message, Attachment, Filter } from "./types.js"
+import { messageToJSON } from "./json.js"
+import type { Filter } from "./types.js"
 
 // --- Args ---
 
@@ -56,6 +57,17 @@ const json = args["--json"] ?? false
 const jsonl = (obj: unknown) => console.log(JSON.stringify(obj))
 const iso = (d: Date) => d.toISOString()
 
+// --- Version ---
+
+function getVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"))
+    return process.env.IMSG_VERSION || pkg.version || "0.0.0"
+  } catch {
+    return process.env.IMSG_VERSION || "0.0.0"
+  }
+}
+
 // --- Main ---
 
 main().catch((err) => {
@@ -65,8 +77,8 @@ main().catch((err) => {
 })
 
 async function main() {
+  if (args["--version"]) return console.log(getVersion())
   if (args["--help"] || !command) return help()
-  if (args["--version"]) return version()
 
   switch (command) {
     case "chats": return chatsCmd()
@@ -87,7 +99,7 @@ async function main() {
 
 // --- Commands ---
 
-async function chatsCmd() {
+function chatsCmd() {
   const db = openDB()
   const chats = db.chats(args["--limit"] ?? 20)
 
@@ -98,7 +110,7 @@ async function chatsCmd() {
   }
 }
 
-async function historyCmd() {
+function historyCmd() {
   const chatId = args["--chat-id"]
   if (chatId == null) bail("--chat-id is required")
 
@@ -107,7 +119,7 @@ async function historyCmd() {
 
   for (const msg of messages) {
     if (json) {
-      jsonl(messageJson(msg, db.attachments(msg.id)))
+      jsonl(messageToJSON(msg, db.attachments(msg.id)))
     } else {
       const dir = msg.isFromMe ? "sent" : "recv"
       console.log(`${iso(msg.date)} [${dir}] ${msg.sender}: ${msg.text}`)
@@ -126,16 +138,15 @@ async function historyCmd() {
 
 async function watchCmd() {
   const db = openDB()
-  const opts = {
+
+  for await (const msg of watch(db, {
     chatId: args["--chat-id"] ?? undefined,
     sinceRowId: args["--since-rowid"] ?? undefined,
     debounce: parseDebounce(args["--debounce"] ?? "250ms"),
     filter: buildFilter(),
-  }
-
-  for await (const msg of watch(db, opts)) {
+  })) {
     if (json) {
-      jsonl(messageJson(msg, args["--attachments"] ? db.attachments(msg.id) : []))
+      jsonl(messageToJSON(msg, args["--attachments"] ? db.attachments(msg.id) : []))
     } else {
       const dir = msg.isFromMe ? "sent" : "recv"
       console.log(`${iso(msg.date)} [${dir}] ${msg.sender}: ${msg.text}`)
@@ -270,29 +281,6 @@ function buildFilter(): Filter | undefined {
   return { participants, after, before }
 }
 
-function messageJson(msg: Message, attachments: Attachment[]) {
-  return {
-    id: msg.id,
-    chat_id: msg.chatId,
-    guid: msg.guid,
-    ...(msg.replyToGuid ? { reply_to_guid: msg.replyToGuid } : {}),
-    sender: msg.sender,
-    is_from_me: msg.isFromMe,
-    text: msg.text,
-    created_at: iso(msg.date),
-    attachments: attachments.map((a) => ({
-      filename: a.filename,
-      transfer_name: a.transferName,
-      uti: a.uti,
-      mime_type: a.mimeType,
-      total_bytes: a.totalBytes,
-      is_sticker: a.isSticker,
-      original_path: a.path,
-      missing: a.missing,
-    })),
-  }
-}
-
 function parseDebounce(value: string): number {
   const units: [string, number][] = [["ms", 1], ["s", 1000], ["m", 60000]]
   for (const [suffix, mult] of units) {
@@ -307,7 +295,7 @@ function bail(msg: string): never {
 }
 
 function help() {
-  console.log(`imsg-plus ${version(true)}
+  console.log(`imsg-plus ${getVersion()}
 Send and read iMessage / SMS from the terminal
 
 Usage:
@@ -329,17 +317,4 @@ Global options:
   --db <path> Path to chat.db (default: ~/Library/Messages/chat.db)
 
 Run 'imsg-plus <command> --help' for command-specific options.`)
-}
-
-function version(returnOnly?: boolean): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"))
-    const v = process.env.IMSG_VERSION || pkg.version || "0.0.0"
-    if (!returnOnly) console.log(v)
-    return v
-  } catch {
-    const v = process.env.IMSG_VERSION || "0.0.0"
-    if (!returnOnly) console.log(v)
-    return v
-  }
 }

@@ -1,7 +1,8 @@
 import { createInterface } from "node:readline"
 import type { DB } from "./db.js"
 import type { Bridge } from "./bridge.js"
-import type { Message, ChatInfo, Attachment } from "./types.js"
+import type { ChatInfo } from "./types.js"
+import { messageToJSON, isGroupChat } from "./json.js"
 import { watch } from "./watch.js"
 import { send } from "./send.js"
 
@@ -56,62 +57,34 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     if (verbose) process.stderr.write(msg + "\n")
   }
 
-  // Message payload builder
-  function messagePayload(msg: Message, attachments: Attachment[] = []) {
+  // Enrich a message with chat context for the wire
+  function enrichMessage(msg: ReturnType<DB["messages"]>[number], attachments: ReturnType<DB["attachments"]> = []) {
     const info = cachedInfo(msg.chatId)
-    const participants = cachedParticipants(msg.chatId)
     const identifier = info?.identifier ?? ""
     const guid = info?.guid ?? ""
-    const isGroup = identifier.includes(";+;") || identifier.includes(";-;") || guid.includes(";+;")
-
     return {
-      id: msg.id,
-      chat_id: msg.chatId,
-      guid: msg.guid,
-      ...(msg.replyToGuid ? { reply_to_guid: msg.replyToGuid } : {}),
-      sender: msg.sender,
-      is_from_me: msg.isFromMe,
-      text: msg.text,
-      created_at: msg.date.toISOString(),
-      attachments: attachments.map(attachmentPayload),
+      ...messageToJSON(msg, attachments),
       chat_identifier: identifier,
       chat_guid: guid,
       chat_name: info?.name ?? "",
-      participants,
-      is_group: isGroup,
+      participants: cachedParticipants(msg.chatId),
+      is_group: isGroupChat(identifier, guid),
     }
   }
 
-  function attachmentPayload(a: Attachment) {
-    return {
-      filename: a.filename,
-      transfer_name: a.transferName,
-      uti: a.uti,
-      mime_type: a.mimeType,
-      total_bytes: a.totalBytes,
-      is_sticker: a.isSticker,
-      original_path: a.path,
-      missing: a.missing,
-    }
-  }
-
-  function chatPayload(chat: { id: number; identifier: string; name: string; service: string; lastMessageAt: Date }) {
+  function enrichChat(chat: { id: number; identifier: string; name: string; service: string; lastMessageAt: Date }) {
     const info = cachedInfo(chat.id)
-    const participants = cachedParticipants(chat.id)
     const identifier = info?.identifier ?? chat.identifier
     const guid = info?.guid ?? ""
-    const name = (info?.name && info.name !== info.identifier ? info.name : null) ?? chat.name
-    const isGroup = identifier.includes(";+;") || guid.includes(";+;")
-
     return {
       id: chat.id,
       identifier,
       guid,
-      name,
+      name: (info?.name && info.name !== info.identifier ? info.name : null) ?? chat.name,
       service: info?.service ?? chat.service,
       last_message_at: chat.lastMessageAt.toISOString(),
-      participants,
-      is_group: isGroup,
+      participants: cachedParticipants(chat.id),
+      is_group: isGroupChat(identifier, guid),
     }
   }
 
@@ -125,7 +98,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     switch (method) {
       case "chats.list": {
         const limit = Math.max(int(params.limit) ?? 20, 1)
-        const chats = db.chats(limit).map(chatPayload)
+        const chats = db.chats(limit).map(enrichChat)
         return respond(id, { chats })
       }
 
@@ -136,7 +109,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         const filter = parseFilter(params)
         const includeAttachments = bool(params.attachments) ?? false
         const messages = db.messages(chatId, { limit, filter }).map((m) =>
-          messagePayload(m, includeAttachments ? db.attachments(m.id) : [])
+          enrichMessage(m, includeAttachments ? db.attachments(m.id) : [])
         )
         return respond(id, { messages })
       }
@@ -155,7 +128,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
           try {
             for await (const msg of watch(db, { chatId, sinceRowId, filter })) {
               if (ac.signal.aborted) return
-              const payload = messagePayload(msg, includeAttachments ? db.attachments(msg.id) : [])
+              const payload = enrichMessage(msg, includeAttachments ? db.attachments(msg.id) : [])
               notify("message", { subscription: subId, message: payload })
 
               // Auto-read for incoming messages
