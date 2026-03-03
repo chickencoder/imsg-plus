@@ -4,7 +4,7 @@ import type { Bridge } from "./bridge.js"
 import type { ChatInfo } from "./types.js"
 import { messageToJSON, isGroupChat } from "./json.js"
 import { watch } from "./watch.js"
-import { send } from "./send.js"
+import { send, react, type TapbackType } from "./send.js"
 
 interface RPCOptions {
   verbose?: boolean
@@ -188,6 +188,17 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         db
       )
       autoTypeOff(handle)
+      return { ok: true }
+    },
+
+    async "messages.react"(p) {
+      const to = need(str(p.to), "to")
+      const guid = need(str(p.guid), "guid")
+      const type = need(str(p.type), "type") as TapbackType
+      const validTypes = ["love", "like", "dislike", "laugh", "emphasis", "question"]
+      if (!validTypes.includes(type)) throw new InvalidParams(`type must be one of: ${validTypes.join(", ")}`)
+
+      await react({ to, guid, type, service: (str(p.service) ?? "imessage") as any, region: str(p.region) ?? undefined })
       return { ok: true }
     },
 
