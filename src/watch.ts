@@ -14,13 +14,13 @@ export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Me
   const interval = opts.debounce ?? 250
   const filter = opts.filter
 
-  // Poll for new messages
+  // Poll for new messages (filters are pushed into the SQL query)
   function poll(): Message[] {
-    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100 })
+    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100, filter })
     for (const msg of msgs) {
       if (msg.id > cursor) cursor = msg.id
     }
-    return filter ? msgs.filter((m) => allows(m, filter)) : msgs
+    return msgs
   }
 
   // Watch the db files for changes, resolve a promise on each change
@@ -57,13 +57,4 @@ export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Me
   } finally {
     for (const w of watchers) w.close()
   }
-}
-
-function allows(msg: Message, filter: Filter): boolean {
-  if (filter.after && msg.date < filter.after) return false
-  if (filter.before && msg.date >= filter.before) return false
-  if (filter.participants?.length) {
-    if (!filter.participants.some((p) => p.toLowerCase() === msg.sender.toLowerCase())) return false
-  }
-  return true
 }

@@ -192,13 +192,27 @@ export function open(path = DEFAULT_PATH) {
       .map((r: any) => parseRow(r, chatId))
   }
 
-  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number } = {}): Message[] {
+  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number; filter?: Filter } = {}): Message[] {
     const limit = opts.limit ?? 100
+    const f = opts.filter
     const bindings: any[] = [afterRowId]
     let chatWhere = ""
     if (opts.chatId != null) {
       chatWhere = " AND cmj.chat_id = ?"
       bindings.push(opts.chatId)
+    }
+    if (f?.after) {
+      chatWhere += " AND m.date >= ?"
+      bindings.push(toNanos(f.after))
+    }
+    if (f?.before) {
+      chatWhere += " AND m.date < ?"
+      bindings.push(toNanos(f.before))
+    }
+    if (f?.participants?.length) {
+      const ph = f.participants.map(() => "?").join(",")
+      chatWhere += ` AND COALESCE(NULLIF(h.id,''), ${cols.destCallerFilter}) COLLATE NOCASE IN (${ph})`
+      bindings.push(...f.participants)
     }
     bindings.push(limit)
 
