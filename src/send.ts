@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
@@ -23,6 +23,9 @@ export async function send(opts: SendOptions, db?: DB): Promise<void> {
   const { recipient, chatTarget, service } = resolveTarget(opts, db)
   const attachment = opts.file ? stage(opts.file) : ""
 
+  // Clean up old staged attachments in the background (don't block the send)
+  cleanStagedAttachments().catch(() => {})
+
   await osascript(SEND_SCRIPT, [
     recipient,
     (opts.text ?? "").trim(),
@@ -33,6 +36,82 @@ export async function send(opts: SendOptions, db?: DB): Promise<void> {
     chatTarget ? "1" : "0",
   ])
 }
+
+// --- Attachment cleanup ---
+
+const STAGED_DIR = join(homedir(), "Library/Messages/Attachments/imsg")
+
+export async function cleanStagedAttachments(maxAgeMs = 3600000): Promise<number> {
+  if (!existsSync(STAGED_DIR)) return 0
+
+  const now = Date.now()
+  let removed = 0
+
+  for (const entry of readdirSync(STAGED_DIR)) {
+    const dirPath = join(STAGED_DIR, entry)
+    try {
+      const age = now - statSync(dirPath).mtimeMs
+      if (age > maxAgeMs) {
+        rmSync(dirPath, { recursive: true, force: true })
+        removed++
+      }
+    } catch {
+      // Directory may have been removed between listing and stat — that's fine
+    }
+  }
+
+  return removed
+}
+
+// --- Reactions ---
+
+export type TapbackType = "love" | "like" | "dislike" | "laugh" | "emphasis" | "question"
+
+const TAPBACK_MAP: Record<TapbackType, number> = {
+  love: 2000,
+  like: 2001,
+  dislike: 2002,
+  laugh: 2003,
+  emphasis: 2004,
+  question: 2005,
+}
+
+export interface ReactOptions {
+  to: string
+  guid: string
+  type: TapbackType
+  service?: "imessage" | "sms"
+  region?: string
+}
+
+export async function react(opts: ReactOptions): Promise<void> {
+  if (!TAPBACK_MAP[opts.type]) throw new Error(`Unknown tapback type: ${opts.type}`)
+
+  const service = opts.service ?? "imessage"
+  const recipient = normalize(opts.to, opts.region ?? "US")
+  const tapbackIndex = TAPBACK_MAP[opts.type]
+
+  await osascript(REACT_SCRIPT, [recipient, opts.guid, String(tapbackIndex), service])
+}
+
+const REACT_SCRIPT = `
+on run argv
+    set theRecipient to item 1 of argv
+    set theGuid to item 2 of argv
+    set tapbackType to item 3 of argv as integer
+    set theService to item 4 of argv
+
+    tell application "Messages"
+        if theService is "sms" then
+            set targetService to first service whose service type is SMS
+        else
+            set targetService to first service whose service type is iMessage
+        end if
+        set targetBuddy to buddy theRecipient of targetService
+        send theGuid to targetBuddy with tapback tapbackType
+    end tell
+end run
+`.trim()
 
 // Pure function: options in → exactly one of recipient/chatTarget out
 

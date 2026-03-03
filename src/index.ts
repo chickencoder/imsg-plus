@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { open, type DB } from "./db.js"
-import { send } from "./send.js"
+import { send, react, cleanStagedAttachments, type TapbackType } from "./send.js"
 import { watch } from "./watch.js"
 import { createBridge } from "./bridge.js"
 import { serve } from "./rpc.js"
@@ -35,6 +35,8 @@ const args = arg(
     "--region": String,
     "--chat-identifier": String,
     "--chat-guid": String,
+    "--guid": String,
+    "--type": String,
     "--handle": String,
     "--state": String,
     "--dylib": String,
@@ -93,6 +95,8 @@ async function main() {
     case "read": return readCmd()
     case "status": return statusCmd()
     case "launch": return launchCmd()
+    case "react": return reactCmd()
+    case "cleanup": return cleanupCmd()
     case "rpc": return rpcCmd()
     default:
       console.error(`Unknown command: ${command}\n`)
@@ -224,6 +228,32 @@ function launchCmd() {
   }
 }
 
+async function reactCmd() {
+  const to = args["--to"]
+  if (!to) bail("--to is required")
+  const guid = args["--guid"]
+  if (!guid) bail("--guid is required")
+  const type = args["--type"] as TapbackType
+  if (!type) bail("--type is required (love, like, dislike, laugh, emphasis, question)")
+
+  await react({
+    to,
+    guid,
+    type,
+    service: args["--service"] as any,
+    region: args["--region"] ?? undefined,
+  })
+
+  if (json) jsonl({ status: "reacted", type })
+  else console.log(`Sent ${type} reaction`)
+}
+
+async function cleanupCmd() {
+  const removed = await cleanStagedAttachments()
+  if (json) jsonl({ removed })
+  else console.log(`Removed ${removed} old staged attachment${removed === 1 ? "" : "s"}`)
+}
+
 async function rpcCmd() {
   const db = openDB()
   const bridge = createBridge()
@@ -282,6 +312,8 @@ Commands:
   history     Show messages for a chat
   watch       Stream incoming messages
   send        Send a message (text and/or attachment)
+  react       Send a tapback reaction (love, like, dislike, laugh, emphasis, question)
+  cleanup     Remove old staged attachments
   typing      Control typing indicator
   read        Mark messages as read
   status      Check feature availability
