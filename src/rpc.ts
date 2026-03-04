@@ -128,11 +128,22 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
   }
 
   function startSubscription(subId: number, ac: AbortController, watchOpts: Parameters<typeof watch>[1], includeAttachments: boolean) {
+    const RETRY_MS = 2000
     ;(async () => {
-      for await (const msg of watch(db, watchOpts)) {
-        if (ac.signal.aborted) return
-        notify("message", { subscription: subId, message: toWireMessage(msg, includeAttachments ? db.attachments(msg.id) : []) })
-        autoMarkRead(msg)
+      while (!ac.signal.aborted) {
+        try {
+          for await (const msg of watch(db, watchOpts)) {
+            if (ac.signal.aborted) return
+            notify("message", { subscription: subId, message: toWireMessage(msg, includeAttachments ? db.attachments(msg.id) : []) })
+            autoMarkRead(msg)
+          }
+          return // generator completed normally
+        } catch (err: any) {
+          if (ac.signal.aborted) return
+          log(`[sub ${subId}] watch error: ${err.message}, restarting in ${RETRY_MS}ms`)
+          notify("error", { subscription: subId, error: { message: err.message }, recovering: true })
+          await new Promise((r) => setTimeout(r, RETRY_MS))
+        }
       }
     })().catch((err) => {
       if (!ac.signal.aborted) notify("error", { subscription: subId, error: { message: err.message } })

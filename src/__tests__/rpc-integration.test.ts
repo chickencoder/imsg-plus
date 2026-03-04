@@ -90,23 +90,33 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     stdin.write(JSON.stringify(obj) + "\n")
   }
 
+  // Buffer-based response reader: queues all JSON lines from stdout
+  // so multi-line chunks don't lose data
+  const responseQueue: any[] = []
+  const waiters: Array<(value: any) => void> = []
+
+  stdout.on("data", (chunk: Buffer) => {
+    const lines = chunk.toString().split("\n").filter(Boolean)
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line)
+        const waiter = waiters.shift()
+        if (waiter) waiter(parsed)
+        else responseQueue.push(parsed)
+      } catch {}
+    }
+  })
+
   function readResponse(): Promise<any> {
+    const queued = responseQueue.shift()
+    if (queued) return Promise.resolve(queued)
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Timeout waiting for response")), 3000)
-
-      function onData(chunk: Buffer) {
-        const lines = chunk.toString().split("\n").filter(Boolean)
-        for (const line of lines) {
-          try {
-            clearTimeout(timeout)
-            stdout.removeListener("data", onData)
-            resolve(JSON.parse(line))
-            return
-          } catch {}
-        }
-      }
-
-      stdout.on("data", onData)
+      const timeout = setTimeout(() => {
+        const idx = waiters.indexOf(resolve)
+        if (idx !== -1) waiters.splice(idx, 1)
+        reject(new Error("Timeout waiting for response"))
+      }, 5000)
+      waiters.push((value) => { clearTimeout(timeout); resolve(value) })
     })
   }
 
@@ -247,6 +257,42 @@ describe("RPC integration", () => {
     expect(res.error.message).toBe("Invalid params")
     expect(res.error.data).toContain("chat_id")
 
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("subscription auto-restarts after watch error", async () => {
+    // Throw on first poll so the error happens immediately (no 5s fs-watch fallback wait).
+    // After the 2s retry, the second watch's first poll returns a message.
+    let callCount = 0
+    const h = createHarness({
+      messagesAfter: () => {
+        callCount++
+        if (callCount === 1) throw new Error("database is locked")
+        if (callCount === 2) return [makeMessage(202, 1)]
+        return []
+      },
+    })
+
+    // Subscribe — error notification and subscribe response arrive in either order
+    // (microtask scheduling: generator rejection can beat the await handler(...) continuation)
+    h.sendRequest({ jsonrpc: "2.0", id: 10, method: "watch.subscribe", params: {} })
+    const first2 = await h.readAllResponses(2)
+    const subRes = first2.find((r) => r.id === 10)!
+    const errNotif = first2.find((r) => r.method === "error")!
+
+    expect(subRes.result.subscription).toBe(1)
+    expect(errNotif.params.error.message).toBe("database is locked")
+    expect(errNotif.params.recovering).toBe(true)
+
+    // After 2s retry, message delivered from restarted watch
+    const msg = await h.readResponse()
+    expect(msg.method).toBe("message")
+    expect(msg.params.message.text).toBe("Message 202")
+
+    // Clean up
+    h.sendRequest({ jsonrpc: "2.0", id: 11, method: "watch.unsubscribe", params: { subscription: 1 } })
+    await h.readResponse()
     h.stdin.end()
     await h.serverDone
   })
