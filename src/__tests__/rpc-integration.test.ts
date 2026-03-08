@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest"
 import { PassThrough } from "node:stream"
+import { mkdtempSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 import type { Chat, Message } from "../types.js"
 
 // Mock node:fs to prevent real fs.watch in watch.ts
@@ -55,6 +58,7 @@ interface TestHarness {
   serverDone: Promise<void>
   sendRequest: (obj: unknown) => void
   readResponse: () => Promise<any>
+  readResponseById: (id: number) => Promise<any>
   readAllResponses: (count: number) => Promise<any[]>
 }
 
@@ -92,9 +96,14 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
   Object.defineProperty(process, "stdin", { value: stdin, writable: true, configurable: true })
   Object.defineProperty(process, "stdout", { value: stdout, writable: true, configurable: true })
 
-  const serverDone = serve(mockDb as any, mockBridge).finally(() => {
+  // Each test gets an isolated queue database
+  const tmpDir = mkdtempSync(join(tmpdir(), "imsg-rpc-test-"))
+  const queuePath = join(tmpDir, "queue.db")
+
+  const serverDone = serve(mockDb as any, mockBridge, { queuePath }).finally(() => {
     Object.defineProperty(process, "stdin", { value: origStdin, writable: true, configurable: true })
     Object.defineProperty(process, "stdout", { value: origStdout, writable: true, configurable: true })
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
   })
 
   function sendRequest(obj: unknown) {
@@ -139,7 +148,17 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     return results
   }
 
-  return { stdin, stdout, serverDone, sendRequest, readResponse, readAllResponses }
+  // Read responses until one with the given id is found (skips notifications)
+  async function readResponseById(id: number): Promise<any> {
+    while (true) {
+      const res = await readResponse()
+      if (res.id === id) return res
+      // Put non-matching notifications back for other readers
+      responseQueue.push(res)
+    }
+  }
+
+  return { stdin, stdout, serverDone, sendRequest, readResponse, readResponseById, readAllResponses }
 }
 
 describe("RPC integration", () => {
@@ -312,10 +331,8 @@ describe("RPC integration", () => {
     await h.serverDone
   })
 
-  it("send returns message id and guid when found", async () => {
-    const h = createHarness({
-      findSentMessage: (afterRowId: number) => ({ id: 500, guid: "msg-500" }),
-    })
+  it("send enqueues and returns id", async () => {
+    const h = createHarness()
 
     h.sendRequest({
       jsonrpc: "2.0",
@@ -324,33 +341,37 @@ describe("RPC integration", () => {
       params: { to: "+15550001", text: "Hi" },
     })
 
-    const res = await h.readResponse()
-    expect(res.id).toBe(30)
+    const res = await h.readResponseById(30)
     expect(res.result.ok).toBe(true)
-    expect(res.result.id).toBe(500)
-    expect(res.result.guid).toBe("msg-500")
+    expect(res.result.queued).toBe(true)
+    expect(res.result.id).toBeGreaterThan(0)
+    expect(res.result.duplicate).toBe(false)
 
     h.stdin.end()
     await h.serverDone
   })
 
-  it("send returns ok without id when message not found", async () => {
-    const h = createHarness({
-      findSentMessage: () => null,
-    })
+  it("send deduplicates by idempotency_key", async () => {
+    const h = createHarness()
 
     h.sendRequest({
       jsonrpc: "2.0",
       id: 31,
       method: "send",
-      params: { to: "+15550001", text: "Hi" },
+      params: { to: "+15550001", text: "Hi", idempotency_key: "test-key-1" },
     })
+    const res1 = await h.readResponseById(31)
+    expect(res1.result.duplicate).toBe(false)
 
-    const res = await h.readResponse()
-    expect(res.id).toBe(31)
-    expect(res.result.ok).toBe(true)
-    expect(res.result.id).toBeUndefined()
-    expect(res.result.guid).toBeUndefined()
+    h.sendRequest({
+      jsonrpc: "2.0",
+      id: 32,
+      method: "send",
+      params: { to: "+15550001", text: "Hi", idempotency_key: "test-key-1" },
+    })
+    const res2 = await h.readResponseById(32)
+    expect(res2.result.duplicate).toBe(true)
+    expect(res2.result.id).toBe(res1.result.id)
 
     h.stdin.end()
     await h.serverDone
