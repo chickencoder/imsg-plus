@@ -298,7 +298,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         region: str(p.region) ?? undefined,
         idempotencyKey: str(p.idempotency_key) ?? undefined,
       })
-      return { ok: true, queued: true, job_id: job.id, duplicate }
+      return { ok: true, queued: true, id: job.id, duplicate }
     },
 
     "queue.status"() {

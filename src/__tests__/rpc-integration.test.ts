@@ -331,7 +331,7 @@ describe("RPC integration", () => {
     await h.serverDone
   })
 
-  it("send enqueues and returns job_id", async () => {
+  it("send enqueues and returns id", async () => {
     const h = createHarness()
 
     h.sendRequest({
@@ -344,7 +344,7 @@ describe("RPC integration", () => {
     const res = await h.readResponseById(30)
     expect(res.result.ok).toBe(true)
     expect(res.result.queued).toBe(true)
-    expect(res.result.job_id).toBeGreaterThan(0)
+    expect(res.result.id).toBeGreaterThan(0)
     expect(res.result.duplicate).toBe(false)
 
     h.stdin.end()
@@ -371,7 +371,7 @@ describe("RPC integration", () => {
     })
     const res2 = await h.readResponseById(32)
     expect(res2.result.duplicate).toBe(true)
-    expect(res2.result.job_id).toBe(res1.result.job_id)
+    expect(res2.result.id).toBe(res1.result.id)
 
     h.stdin.end()
     await h.serverDone
