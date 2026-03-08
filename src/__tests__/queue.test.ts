@@ -25,7 +25,7 @@ describe("openQueue", () => {
 
 describe("enqueue", () => {
   it("adds a job with pending status", () => {
-    const job = queue.enqueue({ to: "+15551234567", text: "hello" })
+    const { job } = queue.enqueue({ to: "+15551234567", text: "hello" })
     expect(job.id).toBe(1)
     expect(job.status).toBe("pending")
     expect(job.to).toBe("+15551234567")
@@ -37,7 +37,7 @@ describe("enqueue", () => {
   })
 
   it("preserves all send options", () => {
-    const job = queue.enqueue({
+    const { job } = queue.enqueue({
       chatId: 42,
       chatIdentifier: "chat;+;group",
       chatGuid: "iMessage;+;chat123",
@@ -57,9 +57,33 @@ describe("enqueue", () => {
   })
 
   it("assigns incrementing IDs", () => {
-    const a = queue.enqueue({ to: "a", text: "1" })
-    const b = queue.enqueue({ to: "b", text: "2" })
+    const { job: a } = queue.enqueue({ to: "a", text: "1" })
+    const { job: b } = queue.enqueue({ to: "b", text: "2" })
     expect(b.id).toBe(a.id + 1)
+  })
+})
+
+describe("idempotency", () => {
+  it("deduplicates by idempotency key", () => {
+    const { job: first, duplicate: d1 } = queue.enqueue({ to: "x", text: "hi", idempotencyKey: "abc-123" })
+    const { job: second, duplicate: d2 } = queue.enqueue({ to: "x", text: "hi", idempotencyKey: "abc-123" })
+
+    expect(d1).toBe(false)
+    expect(d2).toBe(true)
+    expect(second.id).toBe(first.id)
+    expect(queue.all()).toHaveLength(1)
+  })
+
+  it("allows different keys", () => {
+    queue.enqueue({ to: "x", text: "1", idempotencyKey: "key-1" })
+    queue.enqueue({ to: "x", text: "2", idempotencyKey: "key-2" })
+    expect(queue.all()).toHaveLength(2)
+  })
+
+  it("allows null keys (no dedup)", () => {
+    queue.enqueue({ to: "x", text: "1" })
+    queue.enqueue({ to: "x", text: "1" })
+    expect(queue.all()).toHaveLength(2)
   })
 })
 
@@ -136,6 +160,31 @@ describe("counts", () => {
     expect(counts.sent).toBe(1)
     expect(counts.pending).toBe(1)
     expect(counts.processing).toBe(1)
+  })
+})
+
+describe("reapStale", () => {
+  it("reclaims processing jobs older than threshold", async () => {
+    queue.enqueue({ to: "x", text: "hi" })
+    const job = queue.dequeue()!
+    expect(job.status).toBe("processing")
+
+    // Wait just over 1 second so the job's updated_at is in the past
+    await new Promise((r) => setTimeout(r, 1100))
+    const reclaimed = queue.reapStale(1)
+    expect(reclaimed).toBe(1)
+
+    const all = queue.all()
+    expect(all[0].status).toBe("pending")
+  })
+
+  it("does not reclaim recent processing jobs", () => {
+    queue.enqueue({ to: "x", text: "hi" })
+    queue.dequeue()
+
+    // With a large threshold, nothing is stale
+    const reclaimed = queue.reapStale(9999)
+    expect(reclaimed).toBe(0)
   })
 })
 

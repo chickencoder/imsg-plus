@@ -277,7 +277,7 @@ async function cleanupCmd() {
 function enqueueCmd() {
   const service = parseService(args["--service"])
   const queue = openQueue()
-  const job = queue.enqueue({
+  const { job, duplicate } = queue.enqueue({
     to: args["--to"],
     chatId: args["--chat-id"],
     chatIdentifier: args["--chat-identifier"],
@@ -289,7 +289,10 @@ function enqueueCmd() {
     maxAttempts: args["--retries"] ?? 3,
   })
   queue.close()
-  output({ status: "queued", id: job.id }, `queued (job ${job.id})`)
+  output(
+    { status: duplicate ? "duplicate" : "queued", id: job.id },
+    duplicate ? `duplicate (existing job ${job.id})` : `queued (job ${job.id})`
+  )
 }
 
 async function workerCmd() {

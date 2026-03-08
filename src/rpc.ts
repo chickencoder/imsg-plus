@@ -6,11 +6,15 @@ import { serializeMessage, serializeUndelivered } from "./json.js"
 import { parseFilter } from "./filter.js"
 import { watch } from "./watch.js"
 import { send, react, type TapbackType } from "./send.js"
+import { openQueue, type QueueDB } from "./queue.js"
+import { runWorker } from "./worker.js"
 
 interface RPCOptions {
   verbose?: boolean
   autoRead?: boolean
   autoTyping?: boolean
+  /** Path to queue database (default: ~/.imsg-plus/queue.db) */
+  queuePath?: string
 }
 
 // Simple TTL cache: entries expire after 5 minutes
@@ -116,6 +120,47 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     if (!autoTyping || !handle) return
     bridge.setTyping(handle, false).catch((err) => log(`[auto-typing] off: ${err.message}`))
   }
+
+  // --- In-process queue + worker ---
+
+  const queue = openQueue(opts.queuePath)
+  const workerAc = new AbortController()
+
+  runWorker(queue, db, {
+    pollMs: 500,
+    reapStaleSecs: 60,
+    signal: workerAc.signal,
+    log,
+    beforeSend: async (job) => {
+      const handle = job.to || job.chatIdentifier || job.chatGuid || ""
+      if (!job.idempotencyKey) return // CLI-enqueued, no typing
+      await autoType(handle, (job.text ?? "").length)
+    },
+    afterSend: (job) => {
+      const handle = job.to || job.chatIdentifier || job.chatGuid || ""
+      if (!job.idempotencyKey) return
+      autoTypeOff(handle)
+    },
+    onSent: (job) => {
+      // Try to find the sent message in chat.db for the notification
+      const msg = db.findSentMessage(job.id)
+      notify("queue.sent", {
+        job_id: job.id,
+        idempotency_key: job.idempotencyKey,
+        ...(msg ? { message_id: msg.id, guid: msg.guid } : {}),
+      })
+    },
+    onFail: (job, error) => {
+      notify("queue.failed", {
+        job_id: job.id,
+        idempotency_key: job.idempotencyKey,
+        error,
+        status: job.status,
+        attempts: job.attempts,
+        max_attempts: job.maxAttempts,
+      })
+    },
+  }).catch((err) => log(`[worker] fatal: ${err.message}`))
 
   // --- Subscriptions ---
 
@@ -241,36 +286,23 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
       return { ok: true }
     },
 
-    async send(p) {
-      const to = str(p.to)
-      const text = str(p.text) ?? ""
-      const handle = to || str(p.chat_identifier) || str(p.chat_guid) || ""
-      const skipTyping = p.skip_typing === true || p.skipTyping === true
+    send(p) {
+      const { job, duplicate } = queue.enqueue({
+        to: str(p.to) ?? undefined,
+        chatId: int(p.chat_id) ?? undefined,
+        chatIdentifier: str(p.chat_identifier) ?? undefined,
+        chatGuid: str(p.chat_guid) ?? undefined,
+        text: str(p.text) ?? undefined,
+        file: str(p.file) ?? undefined,
+        service: (str(p.service) ?? "auto") as Service,
+        region: str(p.region) ?? undefined,
+        idempotencyKey: str(p.idempotency_key) ?? undefined,
+      })
+      return { ok: true, queued: true, job_id: job.id, duplicate }
+    },
 
-      const beforeId = db.maxRowId()
-      if (!skipTyping) await autoType(handle, text.length)
-      await send(
-        {
-          to: to ?? undefined,
-          chatId: int(p.chat_id) ?? undefined,
-          chatIdentifier: str(p.chat_identifier) ?? undefined,
-          chatGuid: str(p.chat_guid) ?? undefined,
-          text,
-          file: str(p.file) ?? undefined,
-          service: (str(p.service) ?? "auto") as Service,
-          region: str(p.region) ?? undefined,
-        },
-        db
-      )
-      if (!skipTyping) autoTypeOff(handle)
-
-      // Try to find the new message (appears async in chat.db)
-      for (let i = 0; i < 3; i++) {
-        await new Promise((r) => setTimeout(r, 200))
-        const msg = db.findSentMessage(beforeId)
-        if (msg) return { ok: true, id: msg.id, guid: msg.guid }
-      }
-      return { ok: true }
+    "queue.status"() {
+      return queue.counts()
     },
 
     async "messages.react"(p) {
@@ -303,8 +335,11 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
 
   const rl = createInterface({ input: process.stdin, terminal: false })
 
-  // Abort all subscriptions when stdin closes
-  process.stdin.on("end", abortAllSubscriptions)
+  // Abort all subscriptions and worker when stdin closes
+  process.stdin.on("end", () => {
+    abortAllSubscriptions()
+    workerAc.abort()
+  })
 
   for await (const line of rl) {
     if (!line.trim()) continue
@@ -337,6 +372,8 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
   }
 
   abortAllSubscriptions()
+  workerAc.abort()
+  queue.close()
 }
 
 // --- Helpers ---

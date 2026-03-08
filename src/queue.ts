@@ -6,6 +6,7 @@ import type { Service } from "./types.js"
 
 export interface QueueJob {
   id: number
+  idempotencyKey: string | null
   status: "pending" | "processing" | "sent" | "failed"
   createdAt: string
   updatedAt: string
@@ -37,6 +38,7 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idempotency_key TEXT UNIQUE,
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -56,9 +58,11 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
 
   const stmts = {
     insert: db.prepare(`
-      INSERT INTO jobs ("to", chat_id, chat_identifier, chat_guid, text, file, service, region, max_attempts)
-      VALUES (@to, @chatId, @chatIdentifier, @chatGuid, @text, @file, @service, @region, @maxAttempts)
+      INSERT INTO jobs (idempotency_key, "to", chat_id, chat_identifier, chat_guid, text, file, service, region, max_attempts)
+      VALUES (@idempotencyKey, @to, @chatId, @chatIdentifier, @chatGuid, @text, @file, @service, @region, @maxAttempts)
     `),
+
+    findByKey: db.prepare(`SELECT * FROM jobs WHERE idempotency_key = ?`),
 
     // Atomically claim the oldest pending job
     dequeue: db.prepare(`
@@ -81,11 +85,17 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
     all: db.prepare(`SELECT * FROM jobs ORDER BY id ASC`),
     counts: db.prepare(`SELECT status, COUNT(*) as count FROM jobs GROUP BY status`),
     purge: db.prepare(`DELETE FROM jobs WHERE status IN ('sent', 'failed')`),
+    reapStale: db.prepare(`
+      UPDATE jobs SET status = 'pending', updated_at = datetime('now')
+      WHERE status = 'processing'
+        AND updated_at <= datetime('now', '-' || ? || ' seconds')
+    `),
   }
 
   function rowToJob(row: any): QueueJob {
     return {
       id: row.id,
+      idempotencyKey: row.idempotency_key,
       status: row.status,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -114,8 +124,16 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
       service?: Service
       region?: string
       maxAttempts?: number
-    }): QueueJob {
+      idempotencyKey?: string
+    }): { job: QueueJob; duplicate: boolean } {
+      // Dedup: if a key is provided and already exists, return the existing job
+      if (opts.idempotencyKey) {
+        const existing = stmts.findByKey.get(opts.idempotencyKey)
+        if (existing) return { job: rowToJob(existing), duplicate: true }
+      }
+
       const result = stmts.insert.run({
+        idempotencyKey: opts.idempotencyKey ?? null,
         to: opts.to ?? null,
         chatId: opts.chatId ?? null,
         chatIdentifier: opts.chatIdentifier ?? null,
@@ -126,9 +144,8 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
         region: opts.region ?? "US",
         maxAttempts: opts.maxAttempts ?? 3,
       })
-      // Return the inserted job
       const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(result.lastInsertRowid)
-      return rowToJob(row)
+      return { job: rowToJob(row), duplicate: false }
     },
 
     dequeue(): QueueJob | null {
@@ -161,6 +178,11 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
 
     purge(): number {
       return stmts.purge.run().changes
+    },
+
+    /** Reclaim jobs stuck in 'processing' for longer than staleSeconds */
+    reapStale(staleSeconds = 120): number {
+      return stmts.reapStale.run(String(staleSeconds)).changes
     },
 
     close(): void {
