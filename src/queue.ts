@@ -85,9 +85,16 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
     all: db.prepare(`SELECT * FROM jobs ORDER BY id ASC`),
     counts: db.prepare(`SELECT status, COUNT(*) as count FROM jobs GROUP BY status`),
     purge: db.prepare(`DELETE FROM jobs WHERE status IN ('sent', 'failed')`),
-    reapStale: db.prepare(`
+    reapStaleToPending: db.prepare(`
       UPDATE jobs SET status = 'pending', updated_at = datetime('now')
       WHERE status = 'processing'
+        AND attempts < max_attempts
+        AND updated_at <= datetime('now', '-' || ? || ' seconds')
+    `),
+    reapStaleToFailed: db.prepare(`
+      UPDATE jobs SET status = 'failed', last_error = 'exceeded max attempts (stale reaper)', updated_at = datetime('now')
+      WHERE status = 'processing'
+        AND attempts >= max_attempts
         AND updated_at <= datetime('now', '-' || ? || ' seconds')
     `),
   }
@@ -182,7 +189,9 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
 
     /** Reclaim jobs stuck in 'processing' for longer than staleSeconds */
     reapStale(staleSeconds = 120): number {
-      return stmts.reapStale.run(String(staleSeconds)).changes
+      const failed = stmts.reapStaleToFailed.run(String(staleSeconds)).changes
+      const reclaimed = stmts.reapStaleToPending.run(String(staleSeconds)).changes
+      return reclaimed + failed
     },
 
     close(): void {
