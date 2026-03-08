@@ -1,6 +1,6 @@
 {
   "name": "imsg-plus",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Send and read iMessage / SMS from the terminal",
   "type": "module",
   "bin": {
