@@ -133,13 +133,18 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     log,
     beforeSend: async (job) => {
       const handle = job.to || job.chatIdentifier || job.chatGuid || ""
-      if (!job.idempotencyKey) return // CLI-enqueued, no typing
-      await autoType(handle, (job.text ?? "").length)
+      if (!handle) return
+      try {
+        await bridge.setTyping(handle, true)
+        await new Promise((r) => setTimeout(r, 1000))
+      } catch (err: any) {
+        log(`[worker] typing error: ${err.message}`)
+      }
     },
     afterSend: (job) => {
       const handle = job.to || job.chatIdentifier || job.chatGuid || ""
-      if (!job.idempotencyKey) return
-      autoTypeOff(handle)
+      if (!handle) return
+      bridge.setTyping(handle, false).catch((err) => log(`[worker] typing off: ${err.message}`))
     },
     onSent: (job) => {
       // Try to find the sent message in chat.db for the notification
