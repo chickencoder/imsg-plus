@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest"
 import Database from "better-sqlite3"
 import { nanosToDate, dateToNanos, parseAttributedBody, extractReplyGuid, open } from "../db.js"
+import { unlinkSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 const APPLE_EPOCH = 978307200
 
@@ -98,13 +101,190 @@ describe("extractReplyGuid", () => {
   })
 })
 
-describe("open (file-based)", () => {
-  const { unlinkSync } = require("node:fs")
-  const { join } = require("node:path")
-  const { tmpdir } = require("node:os")
+function createDeliveryTestDB(): string {
+  const tmpPath = join(tmpdir(), `imsg-delivery-${Date.now()}.db`)
+  const db = new Database(tmpPath)
+  db.exec(`
+    CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+    CREATE TABLE chat (
+      ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, guid TEXT,
+      display_name TEXT, service_name TEXT
+    );
+    CREATE TABLE message (
+      ROWID INTEGER PRIMARY KEY, handle_id INTEGER, text TEXT, date INTEGER,
+      is_from_me INTEGER, service TEXT, guid TEXT,
+      associated_message_guid TEXT, associated_message_type INTEGER,
+      attributedBody BLOB, destination_caller_id TEXT, is_audio_message INTEGER,
+      is_delivered INTEGER, date_delivered INTEGER, is_sent INTEGER, error INTEGER
+    );
+    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+    CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+    CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+    CREATE TABLE attachment (
+      ROWID INTEGER PRIMARY KEY, filename TEXT, transfer_name TEXT, uti TEXT,
+      mime_type TEXT, total_bytes INTEGER, is_sticker INTEGER, user_info BLOB
+    );
+  `)
+  db.exec(`INSERT INTO handle VALUES (1, '+15551234567');`)
+  db.exec(`INSERT INTO chat VALUES (1, '+15551234567', 'iMessage;-;+15551234567', 'Alice', 'iMessage');`)
+  return tmpPath
+}
 
+describe("undeliveredMessages", () => {
+  it("returns sent-but-undelivered messages older than threshold", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const now = new Date()
+    // Message sent 60 seconds ago, not delivered
+    const sixtySecsAgo = new Date(now.getTime() - 60_000)
+    const nanos = dateToNanos(sixtySecsAgo)
+    rawDb.exec(`
+      INSERT INTO message VALUES (10, 1, 'Stale message', ${nanos}, 1, 'iMessage', 'guid-stale', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 10);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      const stale = imsg.undeliveredMessages(30, 10)
+      expect(stale.length).toBe(1)
+      expect(stale[0].id).toBe(10)
+      expect(stale[0].guid).toBe("guid-stale")
+      expect(stale[0].chatId).toBe(1)
+      expect(stale[0].text).toBe("Stale message")
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns [] when messages are delivered", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const sixtySecsAgo = new Date(Date.now() - 60_000)
+    const nanos = dateToNanos(sixtySecsAgo)
+    rawDb.exec(`
+      INSERT INTO message VALUES (10, 1, 'Delivered', ${nanos}, 1, 'iMessage', 'guid-del', NULL, NULL, NULL, NULL, 0, 1, ${nanos}, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 10);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.undeliveredMessages(30, 10)).toEqual([])
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns [] when message has error", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const sixtySecsAgo = new Date(Date.now() - 60_000)
+    const nanos = dateToNanos(sixtySecsAgo)
+    rawDb.exec(`
+      INSERT INTO message VALUES (10, 1, 'Error msg', ${nanos}, 1, 'iMessage', 'guid-err', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 5);
+      INSERT INTO chat_message_join VALUES (1, 10);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.undeliveredMessages(30, 10)).toEqual([])
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns [] when message is too recent (within threshold)", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    // Sent only 5 seconds ago — within the 30s threshold
+    const fiveSecsAgo = new Date(Date.now() - 5_000)
+    const nanos = dateToNanos(fiveSecsAgo)
+    rawDb.exec(`
+      INSERT INTO message VALUES (10, 1, 'Recent', ${nanos}, 1, 'iMessage', 'guid-recent', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 10);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.undeliveredMessages(30, 10)).toEqual([])
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns [] when delivery columns do not exist", () => {
+    // Use the old-style DB without delivery columns
+    const tmpPath = join(tmpdir(), `imsg-old-${Date.now()}.db`)
+    const rawDb = new Database(tmpPath)
+    rawDb.exec(`
+      CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+      CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, guid TEXT, display_name TEXT, service_name TEXT);
+      CREATE TABLE message (ROWID INTEGER PRIMARY KEY, handle_id INTEGER, text TEXT, date INTEGER, is_from_me INTEGER, service TEXT, guid TEXT, associated_message_guid TEXT, associated_message_type INTEGER, attributedBody BLOB, destination_caller_id TEXT, is_audio_message INTEGER);
+      CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+      CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+      CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+      CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, filename TEXT, transfer_name TEXT, uti TEXT, mime_type TEXT, total_bytes INTEGER, is_sticker INTEGER, user_info BLOB);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.undeliveredMessages()).toEqual([])
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+})
+
+describe("findSentMessage", () => {
+  it("finds the most recent is_from_me message after a given ROWID", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const nanos = dateToNanos(new Date())
+    rawDb.exec(`
+      INSERT INTO message VALUES (10, 1, 'From them', ${nanos}, 0, 'iMessage', 'guid-10', NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0);
+      INSERT INTO message VALUES (11, 1, 'From me', ${nanos}, 1, 'iMessage', 'guid-11', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 10);
+      INSERT INTO chat_message_join VALUES (1, 11);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      const msg = imsg.findSentMessage(5)
+      expect(msg).toEqual({ id: 11, guid: "guid-11" })
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns null when no message exists after the given ROWID", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.findSentMessage(999)).toBeNull()
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+})
+
+describe("open (file-based)", () => {
   function createTestDB(): string {
-    const tmpPath = join(tmpdir(), `imsg-test-${Date.now()}.db`)
+    const tmpPath = join(tmpdir(), `imsg-open-${Date.now()}.db`)
     const db = new Database(tmpPath)
     db.exec(`
       CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);

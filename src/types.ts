@@ -38,6 +38,14 @@ export interface Filter {
   before?: Date
 }
 
+export interface UndeliveredMessage {
+  id: number
+  guid: string
+  chatId: number
+  text: string
+  date: Date
+}
+
 export type Service = "imessage" | "sms" | "auto"
 
 export function parseService(value: string | undefined): Service {

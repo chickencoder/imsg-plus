@@ -1,4 +1,4 @@
-import type { Message, Attachment } from "./types.js"
+import type { Message, Attachment, UndeliveredMessage } from "./types.js"
 
 export function serializeMessage(msg: Message, attachments: Attachment[] = []) {
   return {
@@ -11,6 +11,16 @@ export function serializeMessage(msg: Message, attachments: Attachment[] = []) {
     text: msg.text,
     created_at: msg.date.toISOString(),
     attachments: attachments.map(serializeAttachment),
+  }
+}
+
+export function serializeUndelivered(msg: UndeliveredMessage) {
+  return {
+    id: msg.id,
+    guid: msg.guid,
+    chat_id: msg.chatId,
+    text: msg.text,
+    created_at: msg.date.toISOString(),
   }
 }
 

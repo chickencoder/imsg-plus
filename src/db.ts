@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { Chat, Message, Attachment, Filter } from "./types.js"
+import type { Chat, Message, Attachment, Filter, UndeliveredMessage } from "./types.js"
 
 const APPLE_EPOCH = 978307200
 const NANOS_PER_SEC = 1e9
@@ -132,7 +132,51 @@ export function open(path = DEFAULT_PATH) {
     messagesAfter,
     attachments,
     maxRowId,
+    undeliveredMessages,
+    findSentMessage,
     close: (): void => { db.close() },
+  }
+
+  function undeliveredMessages(staleSecs = 30, windowMins = 10): UndeliveredMessage[] {
+    if (!schema.hasDeliveryColumns) return []
+    const now = new Date()
+    const recentCutoff = new Date(now.getTime() - windowMins * 60 * 1000)
+    const staleCutoff = new Date(now.getTime() - staleSecs * 1000)
+    return db
+      .prepare(
+        `SELECT m.ROWID as id, m.guid, m.date as dateNanos,
+                cmj.chat_id as chatId, IFNULL(m.text,'') as text
+         FROM message m
+         LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+         WHERE m.is_from_me = 1
+           AND m.is_sent = 1
+           AND m.is_delivered = 0
+           AND m.date > ?
+           AND m.date < ?
+           AND m.error = 0
+         ORDER BY m.ROWID ASC`
+      )
+      .all(dateToNanos(recentCutoff), dateToNanos(staleCutoff))
+      .map((row: any) => ({
+        id: row.id,
+        guid: row.guid ?? "",
+        chatId: row.chatId ?? 0,
+        text: (row.text as string).slice(0, 100),
+        date: nanosToDate(row.dateNanos),
+      }))
+  }
+
+  function findSentMessage(afterRowId: number): { id: number; guid: string } | null {
+    const row: any = db
+      .prepare(
+        `SELECT m.ROWID as id, ${schema.guid} as guid
+         FROM message m
+         WHERE m.ROWID > ? AND m.is_from_me = 1
+         ORDER BY m.ROWID DESC LIMIT 1`
+      )
+      .get(afterRowId)
+    if (!row) return null
+    return { id: row.id, guid: row.guid ?? "" }
   }
 
   function chats(limit = 20): Chat[] {
@@ -282,6 +326,8 @@ function detectColumns(db: Database.Database) {
   const hasReactions = msg.has("guid") && msg.has("associated_message_guid") && msg.has("associated_message_type")
   const hasDestCaller = msg.has("destination_caller_id")
 
+  const hasDeliveryColumns = msg.has("is_delivered") && msg.has("is_sent") && msg.has("error")
+
   return {
     body: msg.has("attributedbody") ? "m.attributedBody" : "NULL",
     guid: hasReactions ? "m.guid" : "NULL",
@@ -294,6 +340,7 @@ function detectColumns(db: Database.Database) {
       : "",
     destCallerFilter: hasDestCaller ? "m.destination_caller_id" : "''",
     hasAudioTranscription: msg.has("is_audio_message") && att.has("user_info"),
+    hasDeliveryColumns,
   }
 }
 

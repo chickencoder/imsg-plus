@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import { PassThrough } from "node:stream"
 import type { Chat, Message } from "../types.js"
 
@@ -7,9 +7,18 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>()
   return {
     ...actual,
-    watch: () => ({ close: vi.fn() }),
+    watch: (_path: string, cb?: () => void) => {
+      const id = setInterval(() => cb?.(), 50)
+      return { close: () => clearInterval(id) }
+    },
   }
 })
+
+// Mock send module so the send RPC handler doesn't invoke real osascript
+vi.mock("../send.js", () => ({
+  send: vi.fn().mockResolvedValue(undefined),
+  react: vi.fn().mockResolvedValue(undefined),
+}))
 
 const { serve } = await import("../rpc.js")
 
@@ -62,6 +71,8 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     messages: (chatId: number) => [makeMessage(1, chatId), makeMessage(2, chatId)],
     messagesAfter: () => [],
     attachments: () => [],
+    undeliveredMessages: () => [],
+    findSentMessage: () => null,
     ...dbOverrides,
   }
 
@@ -256,6 +267,161 @@ describe("RPC integration", () => {
     expect(res.error.code).toBe(-32602)
     expect(res.error.message).toBe("Invalid params")
     expect(res.error.data).toContain("chat_id")
+
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("subscription preserves cursor across restart", async () => {
+    const afterRowIds: (number | undefined)[] = []
+    let callCount = 0
+    const h = createHarness({
+      messagesAfter: (afterRowId: number) => {
+        callCount++
+        afterRowIds.push(afterRowId)
+        if (callCount === 1) return [makeMessage(201, 1)]
+        if (callCount === 2) throw new Error("database is locked")
+        if (callCount === 3) return [makeMessage(301, 1)]
+        return []
+      },
+    })
+
+    h.sendRequest({ jsonrpc: "2.0", id: 20, method: "watch.subscribe", params: {} })
+
+    // Subscribe response + first message notification
+    const first2 = await h.readAllResponses(2)
+    const subRes = first2.find((r) => r.id === 20)!
+    expect(subRes.result.subscription).toBe(1)
+
+    // Error notification from call 2
+    const errNotif = await h.readResponse()
+    expect(errNotif.method).toBe("error")
+    expect(errNotif.params.recovering).toBe(true)
+
+    // After retry, message 301 delivered
+    const msg = await h.readResponse()
+    expect(msg.method).toBe("message")
+    expect(msg.params.message.text).toBe("Message 301")
+
+    // Key assertion: after delivering msg 201, restart should use 201 as cursor, not maxRowId (100)
+    expect(afterRowIds[2]).toBe(201)
+
+    h.sendRequest({ jsonrpc: "2.0", id: 21, method: "watch.unsubscribe", params: { subscription: 1 } })
+    await h.readResponse()
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("send returns message id and guid when found", async () => {
+    const h = createHarness({
+      findSentMessage: (afterRowId: number) => ({ id: 500, guid: "msg-500" }),
+    })
+
+    h.sendRequest({
+      jsonrpc: "2.0",
+      id: 30,
+      method: "send",
+      params: { to: "+15550001", text: "Hi" },
+    })
+
+    const res = await h.readResponse()
+    expect(res.id).toBe(30)
+    expect(res.result.ok).toBe(true)
+    expect(res.result.id).toBe(500)
+    expect(res.result.guid).toBe("msg-500")
+
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("send returns ok without id when message not found", async () => {
+    const h = createHarness({
+      findSentMessage: () => null,
+    })
+
+    h.sendRequest({
+      jsonrpc: "2.0",
+      id: 31,
+      method: "send",
+      params: { to: "+15550001", text: "Hi" },
+    })
+
+    const res = await h.readResponse()
+    expect(res.id).toBe(31)
+    expect(res.result.ok).toBe(true)
+    expect(res.result.id).toBeUndefined()
+    expect(res.result.guid).toBeUndefined()
+
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("stale_send notification is emitted for undelivered messages", async () => {
+    const staleMsg = {
+      id: 201,
+      guid: "guid-stale-201",
+      chatId: 1,
+      text: "Hey are you there?",
+      date: new Date("2024-06-01T12:00:00Z"),
+    }
+    const h = createHarness({
+      undeliveredMessages: () => [staleMsg],
+    })
+
+    // Subscribe with a fast stale check interval (100ms) via internal param
+    h.sendRequest({ jsonrpc: "2.0", id: 40, method: "watch.subscribe", params: { _stale_check_ms: 100 } })
+    const subRes = await h.readResponse()
+    expect(subRes.result.subscription).toBe(1)
+
+    // Wait for the stale_send notification (should arrive within ~100ms)
+    const notification = await h.readResponse()
+    expect(notification.method).toBe("stale_send")
+    expect(notification.params.subscription).toBe(1)
+    expect(notification.params.message.id).toBe(201)
+    expect(notification.params.message.guid).toBe("guid-stale-201")
+    expect(notification.params.message.text).toBe("Hey are you there?")
+
+    h.sendRequest({ jsonrpc: "2.0", id: 41, method: "watch.unsubscribe", params: { subscription: 1 } })
+    await h.readResponse()
+    h.stdin.end()
+    await h.serverDone
+  })
+
+  it("stale_send does not re-alert for the same message id", async () => {
+    const staleMsg = {
+      id: 300,
+      guid: "guid-300",
+      chatId: 1,
+      text: "Test",
+      date: new Date("2024-06-01"),
+    }
+    let callCount = 0
+    const h = createHarness({
+      undeliveredMessages: () => {
+        callCount++
+        return [staleMsg]
+      },
+    })
+
+    h.sendRequest({ jsonrpc: "2.0", id: 50, method: "watch.subscribe", params: { _stale_check_ms: 100 } })
+    await h.readResponse() // subscribe response
+
+    // First stale notification
+    const first = await h.readResponse()
+    expect(first.method).toBe("stale_send")
+    expect(first.params.message.id).toBe(300)
+
+    // Wait for several more check cycles — no duplicate should arrive
+    await new Promise((r) => setTimeout(r, 500))
+
+    // Verify undeliveredMessages was called multiple times but no extra stale_send emitted
+    expect(callCount).toBeGreaterThan(1)
+
+    // Unsubscribe — this response should be next (no stale_send in between)
+    h.sendRequest({ jsonrpc: "2.0", id: 51, method: "watch.unsubscribe", params: { subscription: 1 } })
+    const unsubRes = await h.readResponse()
+    expect(unsubRes.id).toBe(51)
+    expect(unsubRes.result.ok).toBe(true)
 
     h.stdin.end()
     await h.serverDone

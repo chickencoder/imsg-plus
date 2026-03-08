@@ -2,7 +2,7 @@ import { createInterface } from "node:readline"
 import type { DB } from "./db.js"
 import type { Bridge } from "./bridge.js"
 import type { Chat, Service } from "./types.js"
-import { serializeMessage } from "./json.js"
+import { serializeMessage, serializeUndelivered } from "./json.js"
 import { parseFilter } from "./filter.js"
 import { watch } from "./watch.js"
 import { send, react, type TapbackType } from "./send.js"
@@ -127,13 +127,41 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     subs.clear()
   }
 
-  function startSubscription(subId: number, ac: AbortController, watchOpts: Parameters<typeof watch>[1], includeAttachments: boolean) {
+  function startSubscription(subId: number, ac: AbortController, watchOpts: Parameters<typeof watch>[1], includeAttachments: boolean, staleSecs = 30, staleCheckMs = 15_000) {
     const RETRY_MS = 2000
+    let lastRowId = watchOpts?.sinceRowId
+
+    // Stale send checker
+    const notifiedStale = new Set<number>()
+    const staleInterval = setInterval(() => {
+      if (ac.signal.aborted) return
+      try {
+        const stale = db.undeliveredMessages(staleSecs)
+        for (const msg of stale) {
+          if (notifiedStale.has(msg.id)) continue
+          notifiedStale.add(msg.id)
+          notify("stale_send", { subscription: subId, message: serializeUndelivered(msg) })
+        }
+      } catch (err: any) {
+        log(`[sub ${subId}] stale check error: ${err.message}`)
+      }
+    }, staleCheckMs)
+    ac.signal.addEventListener("abort", () => clearInterval(staleInterval))
+
+    // Heartbeat: keep the health monitor from mistaking idle silence for a dead socket.
+    // iMessage has no protocol-level heartbeat, so we synthesize one every 15 min.
+    const heartbeatInterval = setInterval(() => {
+      if (ac.signal.aborted) return
+      notify("heartbeat", { subscription: subId })
+    }, 15 * 60 * 1000)
+    ac.signal.addEventListener("abort", () => clearInterval(heartbeatInterval))
+
     ;(async () => {
       while (!ac.signal.aborted) {
         try {
-          for await (const msg of watch(db, watchOpts)) {
+          for await (const msg of watch(db, { ...watchOpts, sinceRowId: lastRowId })) {
             if (ac.signal.aborted) return
+            lastRowId = msg.id
             notify("message", { subscription: subId, message: toWireMessage(msg, includeAttachments ? db.attachments(msg.id) : []) })
             autoMarkRead(msg)
           }
@@ -199,7 +227,9 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         subId,
         ac,
         { chatId: int(p.chat_id) ?? undefined, sinceRowId: int(p.since_rowid) ?? undefined, filter: parseFilter(p) },
-        bool(p.attachments) ?? false
+        bool(p.attachments) ?? false,
+        int(p.stale_threshold) ?? 30,
+        int(p._stale_check_ms) ?? 15_000
       )
       return { subscription: subId }
     },
@@ -215,8 +245,10 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
       const to = str(p.to)
       const text = str(p.text) ?? ""
       const handle = to || str(p.chat_identifier) || str(p.chat_guid) || ""
+      const skipTyping = p.skip_typing === true || p.skipTyping === true
 
-      await autoType(handle, text.length)
+      const beforeId = db.maxRowId()
+      if (!skipTyping) await autoType(handle, text.length)
       await send(
         {
           to: to ?? undefined,
@@ -230,7 +262,14 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         },
         db
       )
-      autoTypeOff(handle)
+      if (!skipTyping) autoTypeOff(handle)
+
+      // Try to find the new message (appears async in chat.db)
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 200))
+        const msg = db.findSentMessage(beforeId)
+        if (msg) return { ok: true, id: msg.id, guid: msg.guid }
+      }
       return { ok: true }
     },
 
