@@ -281,7 +281,7 @@ export function open(path = DEFAULT_PATH) {
          LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
          LEFT JOIN handle h ON m.handle_id = h.ROWID
          WHERE m.ROWID > ?${schema.noReactions}${chatWhere}
-         ORDER BY m.ROWID ASC LIMIT ?`
+         ORDER BY m.date ASC, m.ROWID ASC LIMIT ?`
       )
       .all(...bindings)
       .map((row: any) => parseRow(row, row.chatId ?? opts.chatId ?? 0))

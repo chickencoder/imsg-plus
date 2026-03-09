@@ -39,15 +39,19 @@ export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Me
   try {
     // Yield forever until cancelled
     while (true) {
+      // Register notify BEFORE polling so no fs events are lost
+      // between poll() completing and the callback being set up
+      const change = new Promise<void>((resolve) => {
+        notify = resolve
+        // Fallback poll in case fs events are missed
+        setTimeout(resolve, 2000)
+      })
+
       const msgs = poll()
       for (const msg of msgs) yield msg
 
       // Wait for next fs change
-      await new Promise<void>((resolve) => {
-        notify = resolve
-        // Fallback poll in case fs events are missed
-        setTimeout(resolve, 5000)
-      })
+      await change
 
       // Debounce
       if (interval > 0) {
