@@ -1,6 +1,42 @@
 # Changelog
 
-## 0.4.1 - Unreleased
+## 2.1.1 - 2026-03-28
+
+- fix: remove redundant worker typing that blocked sends for up to 50s when bridge was stale
+- fix: add 5s timeout cap to bridge commands so bridge calls never block indefinitely
+- cleanup: remove dead `autoType`/`autoTypeOff` functions
+
+## 2.1.0 - 2026-03-04
+
+- feat: FIFO send queue with idempotency keys and stale job reaper
+- feat: `enqueue` command for background message delivery
+- feat: `worker` command to process message queue
+- feat: `queue` command to list/purge/count jobs
+- feat: `queue.status` RPC method
+- feat: `queue.sent` and `queue.failed` RPC notifications
+- feat: `stale_send` notifications when sent messages don't appear in chat.db
+- feat: heartbeat notifications every 15 minutes (keep-alive)
+- feat: auto-recovery for watch subscriptions on transient DB errors
+- feat: `messages.react` RPC method
+- feat: TTL cache for chat/participant data
+- fix: FIFO queue race condition and message ordering
+- fix: fail zombie jobs that exceeded max_attempts instead of endlessly reclaiming
+
+## 2.0.0 - 2026-02-01
+
+Complete rewrite from Swift to TypeScript/Node.js.
+
+- **Breaking**: Requires Node.js 20+ instead of Swift runtime
+- **Breaking**: Build with `npm run build` / `make build` instead of SwiftPM
+- rewrite: all CLI commands ported to TypeScript (~2100 LOC vs ~8800 LOC)
+- feat: `cleanup` command to remove old staged attachments
+- feat: better-sqlite3 for database access (faster, simpler than SQLite.swift)
+- feat: `arg` for CLI flag parsing (replaces Commander)
+- improvement: ~2-3s builds vs ~30s (no SwiftPM overhead)
+- improvement: symlink install (instant updates after rebuild)
+- same CLI surface area and RPC protocol as v1
+
+## 0.4.1 - Unreleased (v1 branch)
 
 - fix: prefer handle sends when chat identifier is a direct handle
 - fix: apply history filters before limit (#20, thanks @tommybananas)
