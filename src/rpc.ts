@@ -42,7 +42,6 @@ function ttlCache<K, V>() {
 
 export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Promise<void> {
   const autoRead = opts.autoRead ?? bridge.available
-  const autoTyping = opts.autoTyping ?? bridge.available
   const verbose = opts.verbose ?? false
 
   // --- Caches ---
@@ -106,21 +105,6 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     }, 1000)
   }
 
-  async function autoType(handle: string, textLength: number) {
-    if (!autoTyping || !handle) return
-    try {
-      await bridge.setTyping(handle, true)
-      await new Promise((r) => setTimeout(r, Math.min(1.5 + (textLength / 80) * 2.5, 4) * 1000))
-    } catch (err: any) {
-      log(`[auto-typing] error: ${err.message}`)
-    }
-  }
-
-  function autoTypeOff(handle: string) {
-    if (!autoTyping || !handle) return
-    bridge.setTyping(handle, false).catch((err) => log(`[auto-typing] off: ${err.message}`))
-  }
-
   // --- In-process queue + worker ---
 
   const queue = openQueue(opts.queuePath)
@@ -131,16 +115,10 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     reapStaleSecs: 60,
     signal: workerAc.signal,
     log,
-    beforeSend: async (job) => {
-      const handle = job.to || job.chatIdentifier || job.chatGuid || ""
-      if (!handle) return
-      try {
-        await bridge.setTyping(handle, true)
-        await new Promise((r) => setTimeout(r, 1000))
-      } catch (err: any) {
-        log(`[worker] typing error: ${err.message}`)
-      }
-    },
+    // Typing is handled by the gateway (typingMode: "instant") — no need to
+    // duplicate it here. The old beforeSend typing blocked sends for up to 50s
+    // when the bridge was stale.
+    beforeSend: async () => {},
     afterSend: (job) => {
       const handle = job.to || job.chatIdentifier || job.chatGuid || ""
       if (!handle) return

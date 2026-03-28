@@ -79,6 +79,15 @@ export function createBridge(customDylib?: string) {
   }
 
   async function command(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    // Hard cap: never block callers for more than 5s. The bridge is
+    // best-effort — a stale bridge must not prevent message delivery.
+    const deadline = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`bridge timeout (${action})`)), 5000)
+    )
+    return Promise.race([commandInner(action, params), deadline])
+  }
+
+  async function commandInner(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     // If the lock file is missing, the dylib isn't loaded — launch first
     if (!existsSync(LOCK_FILE)) await launch()
 
