@@ -232,18 +232,25 @@ static NSDictionary* handleRead(NSInteger requestId, NSDictionary *params) {
 // Sends an audio file as a native iMessage voice note (waveform balloon with
 // play button) instead of a generic file pill. Voice notes do NOT use balloon
 // plugins — verified by inspecting received voice notes in chat.db, which
-// have `balloon_bundle_id = NULL` and `is_audio_message = 1`. Structurally
-// they are normal file-transfer messages with the audio-message flag set on
-// the IMMessage.
+// have `balloon_bundle_id = NULL` and `is_audio_message = 1`.
 //
-// FORMAT NOTE — TS side transcodes input to AAC mono 24 kHz m4a via
-// `afconvert` and stages it as `Audio Message.m4a` (the canonical filename
-// Apple clients use). We just attach the staged file here.
+// Approach matches BlueBubblesHelper's proven implementation rather than the
+// "obvious" KVC route (`setIsAudioMessage:` via setValue:forKey:). Although
+// IMMessage *does* have a synthesized `isAudioMessage` property (confirmed
+// via class-dump of IMCore), setting it via KVC after construction does not
+// reliably trigger the receiver-side waveform UI. The bit must be encoded
+// in the `flags:` argument of the long IMMessage initializer:
+//   plain attachment   → flags = 0x100005
+//   audio-message flag → flags = 0x300005   (extra 0x200000 bit)
 //
-// The IMMessage is constructed with the same long-init shape as contact
-// cards, but without `balloonBundleID` / `payloadData`. Instead we pass the
-// IMFileTransfer GUID through `fileTransferGUIDs:` and set `isAudioMessage`
-// via KVC.
+// File-transfer dance is also more involved than a single
+// `guidForNewOutgoingTransferWithLocalURL:` call. The transfer must be
+// registered, retargeted to a daemon-writable persistent path under
+// `~/Library/Messages`, then handed to the daemon explicitly.
+//
+// FORMAT — TS side transcodes input to CAF (LEI16 mono 44.1 kHz) via
+// `afconvert` before reaching this handler. Sending m4a/AAC with the
+// audio-message flag does not reliably render as a waveform balloon.
 
 static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
@@ -265,86 +272,142 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
     }
 
     Class IMMessageClass = NSClassFromString(@"IMMessage");
-    if (!IMMessageClass) {
-        return errorResponse(requestId, @"IMMessage class not found");
-    }
-
     Class IMFileTransferCenterClass = NSClassFromString(@"IMFileTransferCenter");
-    if (!IMFileTransferCenterClass) {
-        return errorResponse(requestId, @"IMFileTransferCenter class not found");
+    Class IMDPersistentAttachmentControllerClass =
+        NSClassFromString(@"IMDPersistentAttachmentController");
+    if (!IMMessageClass || !IMFileTransferCenterClass || !IMDPersistentAttachmentControllerClass) {
+        return errorResponse(requestId,
+            @"Missing IMCore class (IMMessage / IMFileTransferCenter / IMDPersistentAttachmentController)");
     }
 
     @try {
-        // 1. Register the file with IMFileTransferCenter to get a transfer GUID.
-        // The exact selector varies by macOS version; probe the common shapes.
+        // --- 1. Register a new outgoing transfer GUID for the local file ---
         id transferCenter = [IMFileTransferCenterClass performSelector:@selector(sharedInstance)];
         if (!transferCenter) {
             return errorResponse(requestId, @"IMFileTransferCenter sharedInstance unavailable");
         }
 
-        NSURL *fileURL = [NSURL fileURLWithPath:audioPath];
-        NSString *transferGUID = nil;
-
+        NSURL *originalURL = [NSURL fileURLWithPath:audioPath];
         SEL guidForNewSel = @selector(guidForNewOutgoingTransferWithLocalURL:);
-        SEL guidForNewSel2 = @selector(guidForNewOutgoingTransferWithLocalURL:useLegacyGuid:);
-        if ([transferCenter respondsToSelector:guidForNewSel]) {
-            transferGUID = ((id (*)(id, SEL, id))objc_msgSend)(
-                transferCenter, guidForNewSel, fileURL);
-        } else if ([transferCenter respondsToSelector:guidForNewSel2]) {
-            transferGUID = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
-                transferCenter, guidForNewSel2, fileURL, NO);
-        } else {
+        if (![transferCenter respondsToSelector:guidForNewSel]) {
             return errorResponse(requestId,
-                @"IMFileTransferCenter has no known guidForNewOutgoingTransfer selector");
+                @"IMFileTransferCenter missing guidForNewOutgoingTransferWithLocalURL:");
         }
-
+        NSString *transferGUID = ((id (*)(id, SEL, id))objc_msgSend)(
+            transferCenter, guidForNewSel, originalURL);
         if (!transferGUID) {
             return errorResponse(requestId, @"Failed to register outgoing file transfer");
         }
 
-        // 2. Build the IMMessage with the same long-init shape used for contact
-        //    cards (IMsgInjected.m above). Pass the transfer GUID through the
-        //    fileTransferGUIDs: slot. No balloonBundleID / payloadData — voice
-        //    notes don't use balloon plugins.
-        id message = [IMMessageClass alloc];
-        NSAttributedString *fallbackText =
-            [[NSAttributedString alloc] initWithString:@""];
-
-        SEL longInit = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:associatedMessageGUID:associatedMessageType:associatedMessageRange:messageSummaryInfo:);
-        if ([message respondsToSelector:longInit]) {
-            typedef id (*InitFn)(id, SEL,
-                id, id, id, id, id,
-                unsigned long long, id,
-                id, id, id,
-                long long, NSRange, id);
-            InitFn fn = (InitFn)objc_msgSend;
-            message = fn(message, longInit,
-                nil, nil, fallbackText, nil, @[transferGUID],
-                (unsigned long long)0x5, nil,
-                nil, nil, nil,
-                0, NSMakeRange(0, 0), nil);
-        } else {
-            message = [message init];
+        SEL transferForGuidSel = @selector(transferForGUID:);
+        id transfer = nil;
+        if ([transferCenter respondsToSelector:transferForGuidSel]) {
+            transfer = [transferCenter performSelector:transferForGuidSel withObject:transferGUID];
         }
+        if (!transfer) {
+            return errorResponse(requestId, @"transferForGUID: returned nil");
+        }
+
+        // --- 2. Compute the daemon-writable persistent path ---
+        // Messages.app moves outgoing attachments under ~/Library/Messages/Attachments
+        // before sending. Skipping this step makes registerTransferWithDaemon: fail
+        // silently because the source path isn't visible to the daemon's sandbox.
+        NSString *filename = [audioPath lastPathComponent];
+        id persistenceController =
+            [IMDPersistentAttachmentControllerClass performSelector:@selector(sharedInstance)];
+        SEL persistentPathSel =
+            @selector(_persistentPathForTransfer:filename:highQuality:chatGUID:storeAtExternalPath:);
+        if (!persistenceController ||
+            ![persistenceController respondsToSelector:persistentPathSel]) {
+            return errorResponse(requestId,
+                @"IMDPersistentAttachmentController missing _persistentPathForTransfer:...");
+        }
+        typedef NSString* (*PersistentPathFn)(id, SEL, id, NSString*, BOOL, NSString*, BOOL);
+        PersistentPathFn persistentPathFn = (PersistentPathFn)objc_msgSend;
+        NSString *persistentPath = persistentPathFn(
+            persistenceController, persistentPathSel,
+            transfer, filename, YES, nil, YES);
+        if (!persistentPath) {
+            return errorResponse(requestId, @"Failed to compute persistent attachment path");
+        }
+
+        // Copy the staged source into the persistent path.
+        NSError *copyErr = nil;
+        NSString *persistentDir = [persistentPath stringByDeletingLastPathComponent];
+        [[NSFileManager defaultManager] createDirectoryAtPath:persistentDir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:&copyErr];
+        if (copyErr) {
+            return errorResponse(requestId,
+                [NSString stringWithFormat:@"mkdir persistent dir failed: %@", copyErr]);
+        }
+        // Remove a stale file at the dest if one happens to exist
+        [[NSFileManager defaultManager] removeItemAtPath:persistentPath error:nil];
+        BOOL copied = [[NSFileManager defaultManager] copyItemAtPath:audioPath
+                                                              toPath:persistentPath
+                                                               error:&copyErr];
+        if (!copied) {
+            return errorResponse(requestId,
+                [NSString stringWithFormat:@"copy to persistent path failed: %@", copyErr]);
+        }
+
+        // --- 3. Retarget the transfer + register with daemon ---
+        SEL retargetSel = @selector(retargetTransfer:toPath:);
+        if ([transferCenter respondsToSelector:retargetSel]) {
+            ((void (*)(id, SEL, id, id))objc_msgSend)(
+                transferCenter, retargetSel, transferGUID, persistentPath);
+        }
+
+        @try {
+            [transfer setValue:[NSURL fileURLWithPath:persistentPath] forKey:@"localURL"];
+        } @catch (NSException *e) {
+            NSLog(@"[imsg-plus] setValue localURL on IMFileTransfer failed (non-fatal): %@",
+                  e.reason);
+        }
+
+        SEL registerSel = @selector(registerTransferWithDaemon:);
+        if ([transferCenter respondsToSelector:registerSel]) {
+            [transferCenter performSelector:registerSel withObject:transferGUID];
+        }
+
+        // --- 4. Build the IMMessage using BlueBubbles' init signature ---
+        // This long init is *different* from the contact-card one — it ends in
+        // balloonBundleID:payloadData:expressiveSendStyleID: rather than
+        // associatedMessageGUID:... — and it's the one that lets the audio
+        // flag bit (0x200000) actually take effect.
+        id message = [IMMessageClass alloc];
+        NSAttributedString *emptyText =
+            [[NSAttributedString alloc] initWithString:@""];
+        unsigned long long flags = 0x300005ULL; // 0x100005 (file) | 0x200000 (audio)
+
+        SEL bbInit = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:balloonBundleID:payloadData:expressiveSendStyleID:);
+        if (![message respondsToSelector:bbInit]) {
+            return errorResponse(requestId,
+                @"IMMessage missing the BlueBubbles long-init selector — macOS may need a different signature");
+        }
+        typedef id (*BBInitFn)(id, SEL,
+            id, id, id, id, id,
+            unsigned long long, id,
+            id, id,
+            id, id, id);
+        BBInitFn bbInitFn = (BBInitFn)objc_msgSend;
+        message = bbInitFn(message, bbInit,
+            nil, nil, emptyText, nil, @[transferGUID],
+            flags, nil,
+            nil, nil,
+            nil, nil, nil);
 
         if (!message) {
             return errorResponse(requestId, @"Failed to construct IMMessage");
         }
 
-        // 3. Flip the audio-message flag. KVC on IMMessage is the most likely
-        //    path; if that's not supported we'll surface the failure rather
-        //    than silently sending a file pill.
-        BOOL flagged = NO;
-        @try {
-            [message setValue:@YES forKey:@"isAudioMessage"];
-            flagged = YES;
-        } @catch (NSException *e) {
-            NSLog(@"[imsg-plus] setValue isAudioMessage on IMMessage failed: %@", e.reason);
-        }
-        if (!flagged) {
-            return errorResponse(requestId,
-                @"Could not set isAudioMessage on IMMessage — this macOS version may need a different selector");
-        }
+        // Belt-and-braces: also set isAudioMessage via KVC. Class-dump shows
+        // it's a synthesized property; if the flags-bit alone is sufficient
+        // this is a no-op, but it costs nothing and helps in case a future
+        // macOS version inverts which path takes precedence.
+        @try { [message setValue:@YES forKey:@"isAudioMessage"]; }
+        @catch (NSException *e) { /* ignore — the flag bit is the load-bearing path */ }
 
         SEL sendSel = @selector(sendMessage:);
         if (![chat respondsToSelector:sendSel]) {
@@ -355,6 +418,7 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
         return successResponse(requestId, @{
             @"handle": handle,
             @"audio_path": audioPath,
+            @"persistent_path": persistentPath,
             @"transfer_guid": transferGUID,
         });
     } @catch (NSException *exception) {

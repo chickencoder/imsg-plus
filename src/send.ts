@@ -61,13 +61,16 @@ export interface VoiceNoteOptions {
 }
 
 // Sends an audio file as a native iMessage voice note (waveform balloon with
-// play button), not a generic file pill. Like contact cards, this bypasses
-// AppleScript and goes through the dylib bridge so `isAudioMessage` can be
-// flipped on the IMMessage. Hard-fails when the dylib path isn't available.
+// play button), not a generic file pill. Bypasses AppleScript and goes through
+// the dylib bridge so the audio-message flag bit (0x200000) can be set on the
+// IMMessage at construction time. Hard-fails when the dylib path isn't
+// available.
 //
-// We always transcode the input to AAC mono 24 kHz m4a — the format current
-// Apple clients produce — and stage it as `Audio Message.m4a` so Messages.app
-// renders it correctly on the receiver.
+// We always transcode the input to CAF (LEI16, mono, 44.1 kHz) — the format
+// BlueBubblesHelper has shipped successfully to thousands of users — and
+// stage it as `Audio Message.caf`. M4A/AAC inputs do *not* reliably render
+// as a waveform balloon even with the audio-message flag set; CAF is the
+// proven path on the macOS send side.
 export async function sendVoiceNote(
   opts: VoiceNoteOptions,
   bridge: Bridge,
@@ -100,32 +103,35 @@ export async function sendVoiceNote(
   const srcPath = resolve(opts.voiceNote.replace(/^~/, homedir()))
   if (!existsSync(srcPath)) throw new Error(`audio not found: ${srcPath}`)
 
-  const stagedPath = transcodeToM4a(srcPath, opts.runAfconvert)
+  const stagedPath = transcodeToCaf(srcPath, opts.runAfconvert)
 
   await bridge.sendVoiceNote(target, stagedPath)
 }
 
-// Transcodes any audio source to the AAC mono 24 kHz m4a format Messages.app
-// expects, and stages it under the standard imsg attachment dir with the
-// canonical filename `Audio Message.m4a`. Returns the staged path.
+// Transcodes any audio source to the CAF format Messages.app expects on the
+// send path (LEI16, mono, 44.1 kHz) and stages it under the standard imsg
+// attachment dir with the canonical filename `Audio Message.caf`. Returns
+// the staged path.
 //
-// Recipe matches what current Apple clients produce on the wire (verified
-// by reading received voice-note files from chat.db with `afinfo`):
-//   m4af container, AAC codec, 1ch (mono), 24 kHz sample rate, ~32 kbps.
+// Recipe and rationale: this is the format BlueBubblesHelper has shipped
+// successfully for years (`bluebubbles-server/.../fileSystem/index.ts`).
+// Sending m4a/AAC on this path does *not* reliably render as a waveform
+// balloon on the receiver, even with the audio-message flag set on the
+// IMMessage.
 //
 // `runAfconvert` is injectable so tests can stub the binary call without
 // spying on ESM module namespaces.
-export function transcodeToM4a(
+export function transcodeToCaf(
   srcPath: string,
   runAfconvert: (args: string[]) => void = defaultRunAfconvert
 ): string {
   const dir = join(homedir(), "Library/Messages/Attachments/imsg", randomUUID())
   mkdirSync(dir, { recursive: true })
-  const dest = join(dir, "Audio Message.m4a")
-  const tmpDest = join(dir, ".tmp-Audio Message.m4a")
+  const dest = join(dir, "Audio Message.caf")
+  const tmpDest = join(dir, ".tmp-Audio Message.caf")
 
   try {
-    runAfconvert(["-f", "m4af", "-d", "aac", "-c", "1", "-b", "32000", srcPath, tmpDest])
+    runAfconvert(["-f", "caff", "-d", "LEI16@44100", "-c", "1", srcPath, tmpDest])
   } catch (err: any) {
     rmSync(dir, { recursive: true, force: true })
     const stderr = err.stderr?.toString().trim() || err.message

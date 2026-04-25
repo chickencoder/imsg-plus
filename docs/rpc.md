@@ -87,12 +87,14 @@ Result: `{ "pending": 0, "processing": 0, "sent": 5, "failed": 0 }`
 
 Sends an audio file as a native iMessage voice note (waveform balloon with a
 play button on the receiver) instead of a generic file pill. Bypasses
-AppleScript and constructs the IMMessage directly via the IMCore dylib so
-`isAudioMessage` can be set on the message. The audio is transcoded to AAC
-mono 24 kHz m4a (the format current Apple clients produce) via the
-built-in `afconvert` before send. Hard-fails when the dylib path is
-unavailable rather than degrading to a file pill, and is **not** queued —
-the call returns when Messages.app has accepted the message.
+AppleScript and constructs the IMMessage directly via the IMCore dylib,
+encoding the audio-message flag bit (0x200000) in the message's `flags`
+parameter at construction time. The audio is transcoded to CAF
+(LEI16 mono 44.1 kHz) via the built-in `afconvert` before send — this is
+the format that reliably renders as a waveform balloon. Hard-fails when
+the dylib path is unavailable rather than degrading to a file pill, and is
+**not** queued — the call returns when Messages.app has accepted the
+message.
 
 Params (direct):
 - `to` (string) — phone number or email

@@ -174,14 +174,14 @@ describe("sendVoiceNote", () => {
 
       expect(runAfconvert).toHaveBeenCalledTimes(1)
       const afconvertArgs = runAfconvert.mock.calls[0][0]
-      // Recipe: m4af, aac, mono, 32 kbps
-      expect(afconvertArgs).toEqual(expect.arrayContaining(["-f", "m4af", "-d", "aac", "-c", "1", "-b", "32000"]))
+      // Recipe: CAF, LEI16 @ 44.1 kHz, mono — matches BlueBubblesHelper
+      expect(afconvertArgs).toEqual(expect.arrayContaining(["-f", "caff", "-d", "LEI16@44100", "-c", "1"]))
 
       expect(bridge.sendVoiceNote).toHaveBeenCalledTimes(1)
       const [target, stagedPath] = bridge.sendVoiceNote.mock.calls[0]
       expect(target).toBe("+15551234567")
-      // Staged with the canonical Apple filename
-      expect(stagedPath).toMatch(/Audio Message\.m4a$/)
+      // Staged with the canonical Apple filename for voice notes
+      expect(stagedPath).toMatch(/Audio Message\.caf$/)
     } finally {
       vi.restoreAllMocks()
       rmSync(dir, { recursive: true, force: true })
