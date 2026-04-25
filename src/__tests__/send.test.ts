@@ -174,8 +174,8 @@ describe("sendVoiceNote", () => {
 
       expect(runAfconvert).toHaveBeenCalledTimes(1)
       const afconvertArgs = runAfconvert.mock.calls[0][0]
-      // Recipe: CAF, LEI16 @ 44.1 kHz, mono — matches BlueBubblesHelper
-      expect(afconvertArgs).toEqual(expect.arrayContaining(["-f", "caff", "-d", "LEI16@44100", "-c", "1"]))
+      // Recipe: CAF, Opus, mono — matches Apple's own voice notes
+      expect(afconvertArgs).toEqual(expect.arrayContaining(["-f", "caff", "-d", "opus", "-c", "1"]))
 
       expect(bridge.sendVoiceNote).toHaveBeenCalledTimes(1)
       const [target, stagedPath] = bridge.sendVoiceNote.mock.calls[0]

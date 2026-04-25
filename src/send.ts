@@ -66,11 +66,13 @@ export interface VoiceNoteOptions {
 // IMMessage at construction time. Hard-fails when the dylib path isn't
 // available.
 //
-// We always transcode the input to CAF (LEI16, mono, 44.1 kHz) — the format
-// BlueBubblesHelper has shipped successfully to thousands of users — and
-// stage it as `Audio Message.caf`. M4A/AAC inputs do *not* reliably render
-// as a waveform balloon even with the audio-message flag set; CAF is the
-// proven path on the macOS send side.
+// We always transcode the input to CAF/Opus mono 24 kHz and stage it as
+// `Audio Message.caf` — the format Apple's own voice notes use over iMessage.
+// PCM (LEI16) inside a CAF container delivers OK but the receiver renders an
+// empty bubble: Messages.app on the receive side decodes voice notes as Opus
+// and silently ignores the attachment otherwise. Verified empirically against
+// chat.db on Sequoia: Apple-recorded voice notes have uti=public.opus-audio /
+// data format=opus inside caff.
 export async function sendVoiceNote(
   opts: VoiceNoteOptions,
   bridge: Bridge,
@@ -108,16 +110,17 @@ export async function sendVoiceNote(
   await bridge.sendVoiceNote(target, stagedPath)
 }
 
-// Transcodes any audio source to the CAF format Messages.app expects on the
-// send path (LEI16, mono, 44.1 kHz) and stages it under the standard imsg
-// attachment dir with the canonical filename `Audio Message.caf`. Returns
-// the staged path.
+// Transcodes any audio source to the CAF/Opus format Messages.app expects on
+// the receive side (Opus, mono, 24 kHz) and stages it under the standard imsg
+// attachment dir with the canonical filename `Audio Message.caf`. Returns the
+// staged path.
 //
-// Recipe and rationale: this is the format BlueBubblesHelper has shipped
-// successfully for years (`bluebubbles-server/.../fileSystem/index.ts`).
-// Sending m4a/AAC on this path does *not* reliably render as a waveform
-// balloon on the receiver, even with the audio-message flag set on the
-// IMMessage.
+// Recipe rationale: this is the codec Apple itself uses for voice notes
+// over iMessage (verified by inspecting received voice notes — caff
+// container, opus data format, mono, 24 kHz). The receiver-side waveform
+// renderer in Messages.app appears to require Opus specifically; PCM
+// (LEI16) inside a CAF container delivers but renders as an empty bubble.
+// afconvert ships with Opus support natively (no ffmpeg dependency).
 //
 // `runAfconvert` is injectable so tests can stub the binary call without
 // spying on ESM module namespaces.
@@ -131,7 +134,7 @@ export function transcodeToCaf(
   const tmpDest = join(dir, ".tmp-Audio Message.caf")
 
   try {
-    runAfconvert(["-f", "caff", "-d", "LEI16@44100", "-c", "1", srcPath, tmpDest])
+    runAfconvert(["-f", "caff", "-d", "opus", "-c", "1", srcPath, tmpDest])
   } catch (err: any) {
     rmSync(dir, { recursive: true, force: true })
     const stderr = err.stderr?.toString().trim() || err.message

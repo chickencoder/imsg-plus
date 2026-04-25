@@ -89,12 +89,12 @@ Sends an audio file as a native iMessage voice note (waveform balloon with a
 play button on the receiver) instead of a generic file pill. Bypasses
 AppleScript and constructs the IMMessage directly via the IMCore dylib,
 encoding the audio-message flag bit (0x200000) in the message's `flags`
-parameter at construction time. The audio is transcoded to CAF
-(LEI16 mono 44.1 kHz) via the built-in `afconvert` before send — this is
-the format that reliably renders as a waveform balloon. Hard-fails when
-the dylib path is unavailable rather than degrading to a file pill, and is
-**not** queued — the call returns when Messages.app has accepted the
-message.
+parameter at construction time. The audio is transcoded to CAF/Opus mono
+24 kHz via the built-in `afconvert` before send — this is the codec Apple
+itself uses for voice notes over iMessage; PCM in CAF delivers but
+renders as an empty bubble on the receiver. Hard-fails when the dylib
+path is unavailable rather than degrading to a file pill, and is **not**
+queued — the call returns when Messages.app has accepted the message.
 
 Params (direct):
 - `to` (string) — phone number or email
