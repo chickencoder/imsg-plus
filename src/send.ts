@@ -111,16 +111,23 @@ export async function sendVoiceNote(
 }
 
 // Transcodes any audio source to the CAF/Opus format Messages.app expects on
-// the receive side (Opus, mono, 24 kHz) and stages it under the standard imsg
+// the receive side (Opus, mono) and stages it under the standard imsg
 // attachment dir with the canonical filename `Audio Message.caf`. Returns the
 // staged path.
 //
 // Recipe rationale: this is the codec Apple itself uses for voice notes
 // over iMessage (verified by inspecting received voice notes — caff
-// container, opus data format, mono, 24 kHz). The receiver-side waveform
-// renderer in Messages.app appears to require Opus specifically; PCM
-// (LEI16) inside a CAF container delivers but renders as an empty bubble.
-// afconvert ships with Opus support natively (no ffmpeg dependency).
+// container, opus data format, mono). The receiver-side waveform renderer
+// in Messages.app appears to require Opus specifically; PCM (LEI16) inside
+// a CAF container delivers but renders as an empty bubble.
+//
+// Two-step pipeline (m4a/etc → CAF/LEI16 mono → CAF/Opus): a direct
+// non-mono → Opus conversion fails with `ExtAudioFileSetProperty ('cclo')
+// failed (-66564)` because afconvert can't apply both downmixing AND
+// channel-layout-aware Opus encoding in one pass. Going via mono PCM
+// first lets afconvert handle the channel reduction cleanly, then encodes
+// the already-mono PCM to Opus. afconvert ships with Opus support
+// natively, so no ffmpeg dependency.
 //
 // `runAfconvert` is injectable so tests can stub the binary call without
 // spying on ESM module namespaces.
@@ -131,14 +138,19 @@ export function transcodeToCaf(
   const dir = join(homedir(), "Library/Messages/Attachments/imsg", randomUUID())
   mkdirSync(dir, { recursive: true })
   const dest = join(dir, "Audio Message.caf")
+  const pcmIntermediate = join(dir, ".pcm-mono.caf")
   const tmpDest = join(dir, ".tmp-Audio Message.caf")
 
   try {
-    runAfconvert(["-f", "caff", "-d", "opus", "-c", "1", srcPath, tmpDest])
+    runAfconvert(["-f", "caff", "-d", "LEI16", "-c", "1", srcPath, pcmIntermediate])
+    runAfconvert(["-f", "caff", "-d", "opus", pcmIntermediate, tmpDest])
   } catch (err: any) {
     rmSync(dir, { recursive: true, force: true })
     const stderr = err.stderr?.toString().trim() || err.message
     throw new Error(`afconvert failed: ${stderr}`)
+  } finally {
+    // Drop the PCM intermediate; the only file we want to ship is the Opus one.
+    try { rmSync(pcmIntermediate, { force: true }) } catch {}
   }
 
   renameSync(tmpDest, dest)
