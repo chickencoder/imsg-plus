@@ -17,6 +17,26 @@ function makeBridge(overrides: Record<string, unknown> = {}) {
   } as any
 }
 
+// Minimal valid CAF: caff header + desc + data + pakt. Just enough for
+// normalizeVoiceNoteCaf to round-trip without a real audio payload.
+function makeStubCaf(): Buffer {
+  const header = Buffer.from([
+    0x63, 0x61, 0x66, 0x66, // "caff"
+    0x00, 0x01, 0x00, 0x00, // version=1, flags=0
+  ])
+  function chunk(type: string, body: Buffer): Buffer {
+    const h = Buffer.alloc(12)
+    h.write(type, 0, 4, "latin1")
+    h.writeUInt32BE(0, 4)
+    h.writeUInt32BE(body.length, 8)
+    return Buffer.concat([h, body])
+  }
+  const desc = Buffer.alloc(32) // 32-byte CAF audio description, contents don't matter for the stub
+  const data = Buffer.from([0, 0, 0, 0]) // 4-byte edit count, no audio bytes
+  const pakt = Buffer.alloc(24)
+  return Buffer.concat([header, chunk("desc", desc), chunk("data", data), chunk("pakt", pakt)])
+}
+
 describe("pickRecipient", () => {
   it("sends directly to a phone number", () => {
     const result = pickRecipient({ to: "+15551234567", text: "hi" })
@@ -140,8 +160,11 @@ describe("sendVoiceNote", () => {
     const srcPath = join(dir, "clip.m4a")
     writeFileSync(srcPath, Buffer.from("fake-audio"))
 
+    // Stub afconvert with a minimal-but-valid CAF (the normalize pass at the
+    // end of transcodeToCaf reads the output and rewrites the chunk layout,
+    // so it needs real CAF bytes — desc/data/pakt all present).
     const runAfconvert = vi.fn((args: string[]) => {
-      writeFileSync(args[args.length - 1], Buffer.from("transcoded"))
+      writeFileSync(args[args.length - 1], makeStubCaf())
     })
 
     const bridge = makeBridge({
@@ -164,8 +187,11 @@ describe("sendVoiceNote", () => {
     const srcPath = join(dir, "clip.m4a")
     writeFileSync(srcPath, Buffer.from("fake-audio"))
 
+    // Stub afconvert with a minimal-but-valid CAF (the normalize pass at the
+    // end of transcodeToCaf reads the output and rewrites the chunk layout,
+    // so it needs real CAF bytes — desc/data/pakt all present).
     const runAfconvert = vi.fn((args: string[]) => {
-      writeFileSync(args[args.length - 1], Buffer.from("transcoded"))
+      writeFileSync(args[args.length - 1], makeStubCaf())
     })
 
     try {

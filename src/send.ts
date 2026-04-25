@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
@@ -160,8 +160,64 @@ export function transcodeToCaf(
     try { rmSync(pcmIntermediate, { force: true }) } catch {}
   }
 
+  // Strip optional CAF chunks the receiver chokes on for voice notes.
+  // Apple's voice-note CAF is strictly { desc, data, pakt }. afconvert's
+  // Opus output adds { kuki, chan, info, free } and puts pakt BEFORE data.
+  // Same Opus payload, but the receiver renders an empty bubble unless the
+  // wrapper matches Apple's exactly.
+  normalizeVoiceNoteCaf(tmpDest)
+
   renameSync(tmpDest, dest)
   return dest
+}
+
+// Rewrites a CAF file to contain only the chunks Apple's voice notes use,
+// in Apple's order: { desc, data, pakt }. Drops kuki, chan, info, free.
+// Verified against a real Apple-sent voice note in chat.db on Sequoia.
+export function normalizeVoiceNoteCaf(path: string): void {
+  const buf = readFileSync(path)
+  if (buf.length < 8 || buf.toString("latin1", 0, 4) !== "caff") {
+    throw new Error(`not a CAF file: ${path}`)
+  }
+
+  const chunks = new Map<string, Buffer>()
+  let offset = 8 // skip "caff" + 4-byte version/flags
+  while (offset + 12 <= buf.length) {
+    const type = buf.toString("latin1", offset, offset + 4)
+    // 8-byte big-endian size; sizes that overflow JS's safe int are
+    // not realistic for voice notes (file is < 2 GB)
+    const sizeHi = buf.readUInt32BE(offset + 4)
+    const sizeLo = buf.readUInt32BE(offset + 8)
+    const size = sizeHi * 0x1_0000_0000 + sizeLo
+    const start = offset + 12
+    const end = start + size
+    if (end > buf.length) break
+    chunks.set(type, buf.subarray(start, end))
+    offset = end
+  }
+
+  const desc = chunks.get("desc")
+  const data = chunks.get("data")
+  const pakt = chunks.get("pakt")
+  if (!desc || !data || !pakt) {
+    throw new Error(
+      `CAF missing required chunks (have: ${[...chunks.keys()].join(",")})`
+    )
+  }
+
+  const out: Buffer[] = []
+  out.push(buf.subarray(0, 8)) // caff header verbatim
+  for (const [type, body] of [["desc", desc], ["data", data], ["pakt", pakt]] as const) {
+    const header = Buffer.alloc(12)
+    header.write(type, 0, 4, "latin1")
+    const sizeHi = Math.floor(body.length / 0x1_0000_0000)
+    const sizeLo = body.length >>> 0
+    header.writeUInt32BE(sizeHi, 4)
+    header.writeUInt32BE(sizeLo, 8)
+    out.push(header)
+    out.push(body)
+  }
+  writeFileSync(path, Buffer.concat(out))
 }
 
 function defaultRunAfconvert(args: string[]): void {
