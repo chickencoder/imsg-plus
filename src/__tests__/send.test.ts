@@ -173,9 +173,11 @@ describe("sendVoiceNote", () => {
       await sendVoiceNote({ to: "+15551234567", voiceNote: srcPath, runAfconvert }, bridge)
 
       expect(runAfconvert).toHaveBeenCalledTimes(2)
-      // Step 1: source → mono PCM CAF (lets afconvert downmix cleanly)
+      // Step 1: source → mono PCM CAF at 24 kHz (forces second step's Opus
+      // output to 24 kHz, matching Apple's own voice notes; 48 kHz Opus
+      // delivers but renders as an empty bubble on the receiver).
       const step1 = runAfconvert.mock.calls[0][0]
-      expect(step1).toEqual(expect.arrayContaining(["-f", "caff", "-d", "LEI16", "-c", "1"]))
+      expect(step1).toEqual(expect.arrayContaining(["-f", "caff", "-d", "LEI16@24000", "-c", "1"]))
       // Step 2: mono PCM CAF → mono Opus CAF — Apple's own voice-note codec
       const step2 = runAfconvert.mock.calls[1][0]
       expect(step2).toEqual(expect.arrayContaining(["-f", "caff", "-d", "opus"]))

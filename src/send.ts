@@ -142,7 +142,14 @@ export function transcodeToCaf(
   const tmpDest = join(dir, ".tmp-Audio Message.caf")
 
   try {
-    runAfconvert(["-f", "caff", "-d", "LEI16", "-c", "1", srcPath, pcmIntermediate])
+    // Sample rate is 24 kHz (LEI16@24000), matching Apple's own voice notes.
+    // Going through 24 kHz mono PCM forces the second-step Opus output to
+    // 24 kHz too — without it, afconvert's Opus encoder picks 48 kHz from
+    // typical 22.05/44.1 kHz inputs and the receiver renders an empty
+    // bubble. Verified by comparing chat.db rows for an Apple-recorded
+    // voice note vs a 48 kHz Opus we sent: same codec, different rate,
+    // only the 24 kHz one renders.
+    runAfconvert(["-f", "caff", "-d", "LEI16@24000", "-c", "1", srcPath, pcmIntermediate])
     runAfconvert(["-f", "caff", "-d", "opus", pcmIntermediate, tmpDest])
   } catch (err: any) {
     rmSync(dir, { recursive: true, force: true })
