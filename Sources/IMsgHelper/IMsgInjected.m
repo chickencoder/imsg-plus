@@ -308,85 +308,18 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
             return errorResponse(requestId, @"transferForGUID: returned nil");
         }
 
-        // --- 2. Compute the daemon-writable persistent path ---
-        // Messages.app moves outgoing attachments under ~/Library/Messages/Attachments
-        // before sending. Skipping this step makes registerTransferWithDaemon: fail
-        // silently because the source path isn't visible to the daemon's sandbox.
+        // --- 2. Register the transfer with imagent ---
+        // Skip the IMDPersistentAttachmentController persistent-path dance.
+        // It returns a path inside Messages.app's sandbox container
+        // (~/Library/Containers/com.apple.MobileSMS/Data/Library/Messages/...),
+        // which imagent runs outside of and can't read — sends fail silently
+        // with `(libcopyfile.dylib) open ...: Operation not permitted` and
+        // chat.db rows show error=34, transfer_state=6.
         //
-        // chatGUID: must be the resolved chat's GUID — the persistence controller
-        // uses it to pick the per-chat attachment subdirectory. Passing nil makes
-        // the function return nil immediately because it can't compute a base dir.
-        // storeAtExternalPath: NO — "external" is iCloud / shared-container
-        // storage and silently no-ops when iCloud Messages isn't set up; we want
-        // the local per-chat dir under ~/Library/Messages/Attachments.
-        NSString *filename = [audioPath lastPathComponent];
-        NSString *chatGUID = nil;
-        if ([chat respondsToSelector:@selector(guid)]) {
-            chatGUID = [chat performSelector:@selector(guid)];
-        }
-        if (!chatGUID) {
-            return errorResponse(requestId,
-                @"resolved chat has no GUID — cannot compute attachment path");
-        }
-        id persistenceController =
-            [IMDPersistentAttachmentControllerClass performSelector:@selector(sharedInstance)];
-        SEL persistentPathSel =
-            @selector(_persistentPathForTransfer:filename:highQuality:chatGUID:storeAtExternalPath:);
-        if (!persistenceController ||
-            ![persistenceController respondsToSelector:persistentPathSel]) {
-            return errorResponse(requestId,
-                @"IMDPersistentAttachmentController missing _persistentPathForTransfer:...");
-        }
-        typedef NSString* (*PersistentPathFn)(id, SEL, id, NSString*, BOOL, NSString*, BOOL);
-        PersistentPathFn persistentPathFn = (PersistentPathFn)objc_msgSend;
-        NSString *persistentPath = persistentPathFn(
-            persistenceController, persistentPathSel,
-            transfer, filename, YES, chatGUID, NO);
-        if (!persistentPath) {
-            NSLog(@"[imsg-plus] _persistentPathForTransfer returned nil "
-                  @"(filename=%@, chatGUID=%@, transfer=%@)",
-                  filename, chatGUID, transfer);
-            return errorResponse(requestId,
-                [NSString stringWithFormat:
-                 @"Failed to compute persistent attachment path "
-                 @"(chatGUID=%@, filename=%@)", chatGUID, filename]);
-        }
-
-        // Copy the staged source into the persistent path.
-        NSError *copyErr = nil;
-        NSString *persistentDir = [persistentPath stringByDeletingLastPathComponent];
-        [[NSFileManager defaultManager] createDirectoryAtPath:persistentDir
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:&copyErr];
-        if (copyErr) {
-            return errorResponse(requestId,
-                [NSString stringWithFormat:@"mkdir persistent dir failed: %@", copyErr]);
-        }
-        // Remove a stale file at the dest if one happens to exist
-        [[NSFileManager defaultManager] removeItemAtPath:persistentPath error:nil];
-        BOOL copied = [[NSFileManager defaultManager] copyItemAtPath:audioPath
-                                                              toPath:persistentPath
-                                                               error:&copyErr];
-        if (!copied) {
-            return errorResponse(requestId,
-                [NSString stringWithFormat:@"copy to persistent path failed: %@", copyErr]);
-        }
-
-        // --- 3. Retarget the transfer + register with daemon ---
-        SEL retargetSel = @selector(retargetTransfer:toPath:);
-        if ([transferCenter respondsToSelector:retargetSel]) {
-            ((void (*)(id, SEL, id, id))objc_msgSend)(
-                transferCenter, retargetSel, transferGUID, persistentPath);
-        }
-
-        @try {
-            [transfer setValue:[NSURL fileURLWithPath:persistentPath] forKey:@"localURL"];
-        } @catch (NSException *e) {
-            NSLog(@"[imsg-plus] setValue localURL on IMFileTransfer failed (non-fatal): %@",
-                  e.reason);
-        }
-
+        // The TS side stages the audio at ~/Library/Messages/Attachments/imsg/<uuid>/
+        // already (outside the sandbox container), so imagent has direct access.
+        // Just register the transfer with the daemon at the original URL and
+        // skip the copy entirely.
         SEL registerSel = @selector(registerTransferWithDaemon:);
         if ([transferCenter respondsToSelector:registerSel]) {
             [transferCenter performSelector:registerSel withObject:transferGUID];
@@ -439,7 +372,6 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
         return successResponse(requestId, @{
             @"handle": handle,
             @"audio_path": audioPath,
-            @"persistent_path": persistentPath,
             @"transfer_guid": transferGUID,
         });
     } @catch (NSException *exception) {

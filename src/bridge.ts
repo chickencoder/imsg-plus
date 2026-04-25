@@ -59,10 +59,15 @@ export function createBridge(customDylib?: string) {
         "imsg-plus-helper.dylib loaded). Run `imsg-plus status` for setup."
       )
     }
+    // Longer outer cap than typing/read — voice-note dispatch can take a
+    // few seconds inside Messages.app (transfer registration, persistent
+    // path computation, file copy, registerTransferWithDaemon, send), and
+    // if the lock file is missing we'll cold-launch Messages.app first
+    // (waitForReady alone is up to 15s).
     await command("send_voice_note", {
       handle,
       audio_path: audioPath,
-    })
+    }, 30_000)
   }
 
   async function launch(opts: { quiet?: boolean } = {}): Promise<void> {
@@ -98,11 +103,16 @@ export function createBridge(customDylib?: string) {
     }
   }
 
-  async function command(action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    // Hard cap: never block callers for more than 5s. The bridge is
-    // best-effort — a stale bridge must not prevent message delivery.
+  async function command(
+    action: string,
+    params: Record<string, unknown>,
+    timeoutMs = 5_000
+  ): Promise<Record<string, unknown>> {
+    // Hard cap on the round-trip. Default 5s suits typing/read where a
+    // stale bridge must not prevent message delivery; callers that do real
+    // work in the dylib (e.g. send_voice_note) pass a longer timeout.
     const deadline = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`bridge timeout (${action})`)), 5000)
+      setTimeout(() => reject(new Error(`bridge timeout (${action})`)), timeoutMs)
     )
     return Promise.race([commandInner(action, params), deadline])
   }

@@ -45,6 +45,11 @@ clean:
 install: build build-dylib
 	@mkdir -p /usr/local/bin /usr/local/lib
 	@cp .build/release/imsg-plus-helper.dylib /usr/local/lib/imsg-plus-helper.dylib
+	@# Re-sign in place: cp updates the file's mtime, but the ad-hoc
+	@# signature clang produced has the build-time mtime baked in.
+	@# macOS page-in code signing rejects every page if cs_mtime != mtime,
+	@# silently breaking dyld injection on upgrades. Re-signing aligns them.
+	@codesign --force --sign - /usr/local/lib/imsg-plus-helper.dylib
 	@ln -sf $$(pwd)/dist/index.js /usr/local/bin/imsg-plus
 	@chmod +x /usr/local/bin/imsg-plus
 	@echo "Installed. Run 'imsg-plus' from anywhere."
