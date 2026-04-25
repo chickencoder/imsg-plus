@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { open, type DB } from "./db.js"
-import { send, react, cleanStagedAttachments, type TapbackType } from "./send.js"
+import { send, sendContactCard, react, cleanStagedAttachments, type TapbackType } from "./send.js"
 import { watch } from "./watch.js"
 import { createBridge } from "./bridge.js"
 import { serve } from "./rpc.js"
@@ -35,6 +35,7 @@ const args = arg(
     "--to": String,
     "--text": String,
     "--file": String,
+    "--contact-card": String,
     "--service": String,
     "--region": String,
     "--chat-identifier": String,
@@ -155,6 +156,30 @@ async function watchCmd() {
 
 async function sendCmd() {
   const service = parseService(args["--service"])
+  const contactCard = args["--contact-card"]
+
+  if (contactCard) {
+    if (args["--text"] || args["--file"]) {
+      bail("--contact-card is exclusive with --text and --file")
+    }
+    const bridge = createBridge()
+    await sendContactCard(
+      {
+        to: args["--to"],
+        chatId: args["--chat-id"],
+        chatIdentifier: args["--chat-identifier"],
+        chatGuid: args["--chat-guid"],
+        contactCard,
+        service,
+        region: args["--region"],
+      },
+      bridge,
+      openDB()
+    )
+    output({ status: "sent", mode: "contact-card" }, "sent")
+    return
+  }
+
   await send(
     {
       to: args["--to"],
@@ -204,16 +229,17 @@ async function readCmd() {
 function statusCmd() {
   const bridge = createBridge()
   if (json) {
-    console.log(JSON.stringify({ basic_features: true, advanced_features: bridge.available, typing_indicators: bridge.available, read_receipts: bridge.available }))
+    console.log(JSON.stringify({ basic_features: true, advanced_features: bridge.available, typing_indicators: bridge.available, read_receipts: bridge.available, contact_card_send: bridge.available }))
   } else {
     console.log("imsg-plus Status Report")
     console.log("========================")
     console.log("\nBasic features (send, receive, history):\n  Available")
-    console.log("\nAdvanced features (typing indicators, read receipts):")
+    console.log("\nAdvanced features (typing indicators, read receipts, contact-card balloons):")
     if (bridge.available) {
       console.log("  Available — IMCore framework loaded")
       console.log("\n  imsg-plus typing --handle <phone> --state on|off")
       console.log("  imsg-plus read --handle <phone>")
+      console.log("  imsg-plus send --to <phone> --contact-card <path.vcf>")
     } else {
       console.log("  Not available")
       console.log("\n  To enable: disable SIP, run make build-dylib, grant Full Disk Access")

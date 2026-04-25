@@ -1,5 +1,32 @@
-import { describe, it, expect } from "vitest"
-import { pickRecipient, normalize, looksLikeHandle } from "../send.js"
+import { describe, it, expect, vi } from "vitest"
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pickRecipient, normalize, looksLikeHandle, sendContactCard } from "../send.js"
+
+function makeBridge(overrides: Record<string, unknown> = {}) {
+  return {
+    available: true,
+    dylibPath: "/fake/path.dylib",
+    setTyping: vi.fn().mockResolvedValue(undefined),
+    markRead: vi.fn().mockResolvedValue(undefined),
+    sendContactCard: vi.fn().mockResolvedValue(undefined),
+    launch: vi.fn().mockResolvedValue(undefined),
+    kill: vi.fn(),
+    ...overrides,
+  } as any
+}
+
+function withTempVcard(contents: string, fn: (path: string) => Promise<void> | void): Promise<void> | void {
+  const dir = mkdtempSync(join(tmpdir(), "imsg-card-"))
+  const path = join(dir, "test.vcf")
+  writeFileSync(path, contents)
+  try {
+    return fn(path)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
 
 describe("pickRecipient", () => {
   it("sends directly to a phone number", () => {
@@ -103,5 +130,60 @@ describe("looksLikeHandle", () => {
 
   it("returns false for empty string", () => {
     expect(looksLikeHandle("")).toBe(false)
+  })
+})
+
+describe("sendContactCard", () => {
+  const VCARD = "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nTEL:+15551234567\nEND:VCARD\n"
+
+  it("rejects --service sms (rich balloons don't render over SMS)", async () => {
+    await withTempVcard(VCARD, async (path) => {
+      await expect(
+        sendContactCard({ to: "+15551234567", contactCard: path, service: "sms" }, makeBridge())
+      ).rejects.toThrow(/SMS/)
+    })
+  })
+
+  it("throws when the .vcf file is missing", async () => {
+    await expect(
+      sendContactCard({ to: "+15551234567", contactCard: "/no/such/file.vcf" }, makeBridge())
+    ).rejects.toThrow(/vCard not found/)
+  })
+
+  it("throws when the bridge dylib is unavailable", async () => {
+    await withTempVcard(VCARD, async (path) => {
+      const bridge = makeBridge({
+        available: false,
+        dylibPath: null,
+        sendContactCard: vi.fn().mockRejectedValue(new Error("dylib unavailable")),
+      })
+      await expect(
+        sendContactCard({ to: "+15551234567", contactCard: path }, bridge)
+      ).rejects.toThrow(/dylib/)
+    })
+  })
+
+  it("dispatches to bridge.sendContactCard with the .vcf bytes and basename", async () => {
+    await withTempVcard(VCARD, async (path) => {
+      const bridge = makeBridge()
+      await sendContactCard({ to: "+15551234567", contactCard: path }, bridge)
+      expect(bridge.sendContactCard).toHaveBeenCalledTimes(1)
+      const [target, data, filename] = bridge.sendContactCard.mock.calls[0]
+      expect(target).toBe("+15551234567")
+      expect(Buffer.isBuffer(data)).toBe(true)
+      expect(data.toString("utf8")).toBe(VCARD)
+      expect(filename).toBe("test.vcf")
+    })
+  })
+
+  it("uses chat_guid as the dylib target when set", async () => {
+    await withTempVcard(VCARD, async (path) => {
+      const bridge = makeBridge()
+      await sendContactCard(
+        { chatGuid: "iMessage;+;chat999", contactCard: path },
+        bridge
+      )
+      expect(bridge.sendContactCard.mock.calls[0][0]).toBe("iMessage;+;chat999")
+    })
   })
 })

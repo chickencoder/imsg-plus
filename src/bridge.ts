@@ -29,6 +29,7 @@ export function createBridge(customDylib?: string) {
     dylibPath,
     setTyping,
     markRead,
+    sendContactCard,
     launch,
     kill,
   }
@@ -43,6 +44,27 @@ export function createBridge(customDylib?: string) {
   async function markRead(handle: string): Promise<void> {
     if (!dylibPath) return
     await command("read", { handle })
+  }
+
+  // Throws when unavailable: contact-card rendering REQUIRES the dylib path,
+  // and silently degrading would deliver an inline file pill — exactly the bug
+  // this method exists to fix.
+  async function sendContactCard(
+    handle: string,
+    vcardData: Buffer,
+    filename: string
+  ): Promise<void> {
+    if (!dylibPath) {
+      throw new Error(
+        "contact-card send requires the IMCore dylib (SIP disabled + " +
+        "imsg-plus-helper.dylib loaded). Run `imsg-plus status` for setup."
+      )
+    }
+    await command("send_contact_card", {
+      handle,
+      vcard_b64: vcardData.toString("base64"),
+      filename,
+    })
   }
 
   async function launch(opts: { quiet?: boolean } = {}): Promise<void> {

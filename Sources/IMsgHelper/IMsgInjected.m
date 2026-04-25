@@ -11,6 +11,8 @@
 #import <objc/message.h>
 #import <unistd.h>
 
+@class IMMessage;
+
 #pragma mark - IPC File Paths
 
 static NSString *kCommandFile = nil;
@@ -223,6 +225,133 @@ static NSDictionary* handleRead(NSInteger requestId, NSDictionary *params) {
     }
 }
 
+#pragma mark - Contact-Card Send
+//
+// handleSendContactCard
+// =====================
+// Sends a .vcf as a rich contact balloon (avatar + name + chevron pill) instead
+// of a generic file attachment. The receiver renders this via Messages.app's
+// `com.apple.messages.contact-card-extension` balloon plugin, which is only
+// triggered when the outgoing IMMessage carries a non-nil `balloonBundleID`
+// + `payloadData`. AppleScript can't set those, so we have to construct the
+// IMMessage in-process via IMCore and dispatch via [chat sendMessage:].
+//
+// SCHEMA NOTE — payload_data plist is not officially documented.
+// The schema in buildContactCardPayload below is a best-effort structure.
+// Before relying on this in production, verify against a captured ground-truth
+// message by sending a contact via Contacts.app's Share Contact, then:
+//   sqlite3 ~/Library/Messages/chat.db \
+//     "SELECT balloon_bundle_id, hex(payload_data) FROM message
+//        WHERE balloon_bundle_id LIKE '%contact%' ORDER BY ROWID DESC LIMIT 1"
+//   # then: xxd -r -p > /tmp/p.bin && plutil -convert xml1 /tmp/p.bin -o -
+// If the captured plist differs, update buildContactCardPayload accordingly.
+
+static NSData* buildContactCardPayload(NSString *filename, NSData *vcardData) {
+    NSDictionary *plist = @{
+        @"bid": @"com.apple.messages.contact-card-extension",
+        @"filename": filename ?: @"contact.vcf",
+        @"vcard": vcardData,
+    };
+    NSError *error = nil;
+    NSData *data = [NSPropertyListSerialization
+        dataWithPropertyList:plist
+                      format:NSPropertyListBinaryFormat_v1_0
+                     options:0
+                       error:&error];
+    if (error) {
+        NSLog(@"[imsg-plus] Failed to serialize contact-card payload: %@", error);
+        return nil;
+    }
+    return data;
+}
+
+static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *params) {
+    NSString *handle = params[@"handle"];
+    NSString *vcardB64 = params[@"vcard_b64"];
+    NSString *filename = params[@"filename"] ?: @"contact.vcf";
+
+    if (!handle || !vcardB64) {
+        return errorResponse(requestId, @"Missing required parameters: handle, vcard_b64");
+    }
+
+    NSData *vcardData = [[NSData alloc] initWithBase64EncodedString:vcardB64 options:0];
+    if (!vcardData || vcardData.length == 0) {
+        return errorResponse(requestId, @"vcard_b64 is empty or not valid base64");
+    }
+
+    id chat = findChat(handle);
+    if (!chat) {
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"Chat not found: %@", handle]);
+    }
+
+    NSData *payloadData = buildContactCardPayload(filename, vcardData);
+    if (!payloadData) {
+        return errorResponse(requestId, @"Failed to build contact-card payload plist");
+    }
+
+    Class IMMessageClass = NSClassFromString(@"IMMessage");
+    if (!IMMessageClass) {
+        return errorResponse(requestId, @"IMMessage class not found");
+    }
+
+    @try {
+        id message = [IMMessageClass alloc];
+        NSAttributedString *fallbackText =
+            [[NSAttributedString alloc] initWithString:@"Contact"];
+
+        // Construct via the long associated-message init (same shape used by
+        // tapbacks in the BlueBubbles approach) and apply balloon-plugin
+        // metadata via KVC. The balloon-aware init signature varies across
+        // macOS versions; KVC is more robust.
+        SEL longInit = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:associatedMessageGUID:associatedMessageType:associatedMessageRange:messageSummaryInfo:);
+        if ([message respondsToSelector:longInit]) {
+            typedef id (*InitFn)(id, SEL,
+                id, id, id, id, id,
+                unsigned long long, id,
+                id, id, id,
+                long long, NSRange, id);
+            InitFn fn = (InitFn)objc_msgSend;
+            message = fn(message, longInit,
+                nil, nil, fallbackText, nil, nil,
+                (unsigned long long)0x5, nil,
+                nil, nil, nil,
+                0, NSMakeRange(0, 0), nil);
+        } else {
+            message = [message init];
+        }
+
+        if (!message) {
+            return errorResponse(requestId, @"Failed to construct IMMessage");
+        }
+
+        NSString *bundleID = @"com.apple.messages.contact-card-extension";
+        @try { [message setValue:bundleID forKey:@"balloonBundleID"]; }
+        @catch (NSException *e) { NSLog(@"[imsg-plus] setValue balloonBundleID failed: %@", e.reason); }
+        @try { [message setValue:payloadData forKey:@"payloadData"]; }
+        @catch (NSException *e) { NSLog(@"[imsg-plus] setValue payloadData failed: %@", e.reason); }
+
+        SEL sendSel = @selector(sendMessage:);
+        if (![chat respondsToSelector:sendSel]) {
+            return errorResponse(requestId, @"Chat does not respond to sendMessage:");
+        }
+        [chat performSelector:sendSel withObject:message];
+
+        return successResponse(requestId, @{
+            @"handle": handle,
+            @"filename": filename,
+            @"bundle_id": bundleID,
+            @"payload_bytes": @(payloadData.length),
+            @"vcard_bytes": @(vcardData.length),
+        });
+    } @catch (NSException *exception) {
+        NSLog(@"[imsg-plus] ❌ Exception in send_contact_card: %@\n%@",
+              exception.reason, exception.callStackSymbols);
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"send_contact_card failed: %@", exception.reason]);
+    }
+}
+
 static NSDictionary* handleStatus(NSInteger requestId) {
     Class registryClass = NSClassFromString(@"IMChatRegistry");
     BOOL hasRegistry = (registryClass != nil);
@@ -251,10 +380,11 @@ static NSDictionary* processCommand(NSDictionary *command) {
 
     NSLog(@"[imsg-plus] Processing: %@ (id=%ld)", action, (long)requestId);
 
-    if ([action isEqualToString:@"typing"]) return handleTyping(requestId, params);
-    if ([action isEqualToString:@"read"])   return handleRead(requestId, params);
-    if ([action isEqualToString:@"status"]) return handleStatus(requestId);
-    if ([action isEqualToString:@"ping"])   return successResponse(requestId, @{@"pong": @YES});
+    if ([action isEqualToString:@"typing"])             return handleTyping(requestId, params);
+    if ([action isEqualToString:@"read"])               return handleRead(requestId, params);
+    if ([action isEqualToString:@"send_contact_card"])  return handleSendContactCard(requestId, params);
+    if ([action isEqualToString:@"status"])             return handleStatus(requestId);
+    if ([action isEqualToString:@"ping"])               return successResponse(requestId, @{@"pong": @YES});
 
     return errorResponse(requestId, [NSString stringWithFormat:@"Unknown action: %@", action]);
 }

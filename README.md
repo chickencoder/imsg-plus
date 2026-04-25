@@ -58,6 +58,10 @@ imsg-plus watch --chat-id 1 --attachments --json
 # Send a message
 imsg-plus send --to "+14155551212" --text "hello" --file ~/pic.jpg
 
+# Send a contact as a rich balloon (avatar + name + chevron pill, not a file
+# attachment). Requires advanced features. Exclusive with --text/--file.
+imsg-plus send --to "+14155551212" --contact-card ~/Desktop/jane.vcf
+
 # Queue a message for reliable delivery (retries on failure)
 imsg-plus enqueue --to "+14155551212" --text "hello" --retries 3
 
@@ -119,6 +123,7 @@ imsg-plus rpc [--no-auto-read] [--no-auto-typing] [--verbose]
 | `messages.markRead` | Mark messages as read |
 | `messages.react` | Send a tapback reaction |
 | `send` | Queue a message for delivery |
+| `send.contactCard` | Send a `.vcf` as a rich contact balloon |
 | `queue.status` | Get queue job counts |
 | `typing.set` | Show/hide typing indicator |
 | `watch.subscribe` | Subscribe to new messages |

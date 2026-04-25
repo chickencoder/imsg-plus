@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { parsePhoneNumber } from "libphonenumber-js"
+import type { Bridge } from "./bridge.js"
 import type { DB } from "./db.js"
 import type { Service } from "./types.js"
 
@@ -36,6 +37,61 @@ export async function send(opts: SendOptions, db?: DB): Promise<void> {
     chatTarget,
     chatTarget ? "1" : "0",
   ])
+}
+
+// --- Contact-card send (rich balloon) ---
+
+export interface ContactCardOptions {
+  to?: string
+  chatId?: number
+  chatIdentifier?: string
+  chatGuid?: string
+  contactCard: string
+  service?: Service
+  region?: string
+}
+
+// Sends a .vcf as a rich contact balloon (avatar + name + chevron pill on the
+// receiver) instead of a generic file attachment. Bypasses AppleScript and
+// constructs the IMMessage directly via the IMCore dylib so balloonBundleID +
+// payloadData can be set. Hard-fails when the dylib path isn't available
+// rather than silently degrading to a file attachment.
+export async function sendContactCard(
+  opts: ContactCardOptions,
+  bridge: Bridge,
+  db?: DB
+): Promise<void> {
+  if (!opts.contactCard) throw new Error("--contact-card path is required")
+
+  const service = opts.service ?? "imessage"
+  if (service === "sms") {
+    throw new Error("rich contact balloons do not render over SMS; use --service imessage")
+  }
+
+  // Reuse the existing chat-target resolution. The dylib's findChat accepts
+  // either a normalized handle or a chat identifier/guid.
+  const { recipient, chatTarget } = pickRecipient(
+    {
+      to: opts.to,
+      chatId: opts.chatId,
+      chatIdentifier: opts.chatIdentifier,
+      chatGuid: opts.chatGuid,
+      service,
+      region: opts.region,
+      // pickRecipient requires text or file in the SendOptions sense, but
+      // we're only using it for target resolution — pass a placeholder.
+      text: " ",
+    },
+    db
+  )
+  const target = chatTarget || recipient
+  if (!target) throw new Error("missing recipient or chat target")
+
+  const vcardPath = resolve(opts.contactCard.replace(/^~/, homedir()))
+  if (!existsSync(vcardPath)) throw new Error(`vCard not found: ${vcardPath}`)
+  const vcardData = readFileSync(vcardPath)
+
+  await bridge.sendContactCard(target, vcardData, basename(vcardPath))
 }
 
 // --- Attachment cleanup ---

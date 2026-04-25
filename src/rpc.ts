@@ -5,7 +5,7 @@ import type { Chat, Service } from "./types.js"
 import { serializeMessage, serializeUndelivered } from "./json.js"
 import { parseFilter } from "./filter.js"
 import { watch } from "./watch.js"
-import { send, react, type TapbackType } from "./send.js"
+import { send, sendContactCard, react, type TapbackType } from "./send.js"
 import { openQueue, type QueueDB } from "./queue.js"
 import { runWorker } from "./worker.js"
 
@@ -286,6 +286,25 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
 
     "queue.status"() {
       return queue.counts()
+    },
+
+    async "send.contactCard"(p) {
+      const vcardPath = need(str(p.vcard_path), "vcard_path")
+      const service = (str(p.service) ?? "imessage") as Service
+      await sendContactCard(
+        {
+          to: str(p.to) ?? undefined,
+          chatId: int(p.chat_id) ?? undefined,
+          chatIdentifier: str(p.chat_identifier) ?? undefined,
+          chatGuid: str(p.chat_guid) ?? undefined,
+          contactCard: vcardPath,
+          service,
+          region: str(p.region) ?? undefined,
+        },
+        bridge,
+        db
+      )
+      return { ok: true }
     },
 
     async "messages.react"(p) {
