@@ -85,7 +85,7 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     dylibPath: null,
     setTyping: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
-    sendContactCard: vi.fn().mockResolvedValue(undefined),
+    sendVoiceNote: vi.fn().mockResolvedValue(undefined),
     launch: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn(),
     ...bridgeOverrides,

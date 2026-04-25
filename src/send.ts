@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, rmSync } from "node:fs"
+import { execFile, execFileSync } from "node:child_process"
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
@@ -23,7 +23,14 @@ export async function send(opts: SendOptions, db?: DB): Promise<void> {
   if (!opts.text && !opts.file) throw new Error("--text or --file is required")
 
   const { recipient, chatTarget, service } = pickRecipient(opts, db)
-  const attachment = opts.file ? stage(opts.file) : ""
+  // The RPC `send` handler stages the file at enqueue time so the source
+  // can disappear before the worker runs (the original caller may have
+  // pointed us at a temp file they're about to clean up). Detect that and
+  // skip re-staging — re-staging an already-staged file would create a
+  // second redundant copy and break attachment-cleanup invariants.
+  const attachment = opts.file
+    ? (isAlreadyStaged(opts.file) ? resolve(opts.file.replace(/^~/, homedir())) : stage(opts.file))
+    : ""
 
   // Clean up old staged attachments in the background (don't block the send)
   cleanStagedAttachments().catch(() => {})
@@ -39,37 +46,40 @@ export async function send(opts: SendOptions, db?: DB): Promise<void> {
   ])
 }
 
-// --- Contact-card send (rich balloon) ---
+// --- Voice-note send (native audio message) ---
 
-export interface ContactCardOptions {
+export interface VoiceNoteOptions {
   to?: string
   chatId?: number
   chatIdentifier?: string
   chatGuid?: string
-  contactCard: string
+  voiceNote: string
   service?: Service
   region?: string
+  /** Test seam: stub the afconvert invocation. */
+  runAfconvert?: (args: string[]) => void
 }
 
-// Sends a .vcf as a rich contact balloon (avatar + name + chevron pill on the
-// receiver) instead of a generic file attachment. Bypasses AppleScript and
-// constructs the IMMessage directly via the IMCore dylib so balloonBundleID +
-// payloadData can be set. Hard-fails when the dylib path isn't available
-// rather than silently degrading to a file attachment.
-export async function sendContactCard(
-  opts: ContactCardOptions,
+// Sends an audio file as a native iMessage voice note (waveform balloon with
+// play button), not a generic file pill. Like contact cards, this bypasses
+// AppleScript and goes through the dylib bridge so `isAudioMessage` can be
+// flipped on the IMMessage. Hard-fails when the dylib path isn't available.
+//
+// We always transcode the input to AAC mono 24 kHz m4a — the format current
+// Apple clients produce — and stage it as `Audio Message.m4a` so Messages.app
+// renders it correctly on the receiver.
+export async function sendVoiceNote(
+  opts: VoiceNoteOptions,
   bridge: Bridge,
   db?: DB
 ): Promise<void> {
-  if (!opts.contactCard) throw new Error("--contact-card path is required")
+  if (!opts.voiceNote) throw new Error("--voice-note path is required")
 
   const service = opts.service ?? "imessage"
   if (service === "sms") {
-    throw new Error("rich contact balloons do not render over SMS; use --service imessage")
+    throw new Error("voice notes do not render over SMS; use --service imessage")
   }
 
-  // Reuse the existing chat-target resolution. The dylib's findChat accepts
-  // either a normalized handle or a chat identifier/guid.
   const { recipient, chatTarget } = pickRecipient(
     {
       to: opts.to,
@@ -87,16 +97,57 @@ export async function sendContactCard(
   const target = chatTarget || recipient
   if (!target) throw new Error("missing recipient or chat target")
 
-  const vcardPath = resolve(opts.contactCard.replace(/^~/, homedir()))
-  if (!existsSync(vcardPath)) throw new Error(`vCard not found: ${vcardPath}`)
-  const vcardData = readFileSync(vcardPath)
+  const srcPath = resolve(opts.voiceNote.replace(/^~/, homedir()))
+  if (!existsSync(srcPath)) throw new Error(`audio not found: ${srcPath}`)
 
-  await bridge.sendContactCard(target, vcardData, basename(vcardPath))
+  const stagedPath = transcodeToM4a(srcPath, opts.runAfconvert)
+
+  await bridge.sendVoiceNote(target, stagedPath)
+}
+
+// Transcodes any audio source to the AAC mono 24 kHz m4a format Messages.app
+// expects, and stages it under the standard imsg attachment dir with the
+// canonical filename `Audio Message.m4a`. Returns the staged path.
+//
+// Recipe matches what current Apple clients produce on the wire (verified
+// by reading received voice-note files from chat.db with `afinfo`):
+//   m4af container, AAC codec, 1ch (mono), 24 kHz sample rate, ~32 kbps.
+//
+// `runAfconvert` is injectable so tests can stub the binary call without
+// spying on ESM module namespaces.
+export function transcodeToM4a(
+  srcPath: string,
+  runAfconvert: (args: string[]) => void = defaultRunAfconvert
+): string {
+  const dir = join(homedir(), "Library/Messages/Attachments/imsg", randomUUID())
+  mkdirSync(dir, { recursive: true })
+  const dest = join(dir, "Audio Message.m4a")
+  const tmpDest = join(dir, ".tmp-Audio Message.m4a")
+
+  try {
+    runAfconvert(["-f", "m4af", "-d", "aac", "-c", "1", "-b", "32000", srcPath, tmpDest])
+  } catch (err: any) {
+    rmSync(dir, { recursive: true, force: true })
+    const stderr = err.stderr?.toString().trim() || err.message
+    throw new Error(`afconvert failed: ${stderr}`)
+  }
+
+  renameSync(tmpDest, dest)
+  return dest
+}
+
+function defaultRunAfconvert(args: string[]): void {
+  execFileSync("/usr/bin/afconvert", args, { stdio: ["ignore", "ignore", "pipe"] })
 }
 
 // --- Attachment cleanup ---
 
 const STAGED_DIR = join(homedir(), "Library/Messages/Attachments/imsg")
+
+function isAlreadyStaged(filePath: string): boolean {
+  const real = resolve(filePath.replace(/^~/, homedir()))
+  return real.startsWith(STAGED_DIR + "/")
+}
 
 export async function cleanStagedAttachments(maxAgeMs = 3600000): Promise<number> {
   if (!existsSync(STAGED_DIR)) return 0
@@ -220,7 +271,7 @@ export function looksLikeHandle(value: string): boolean {
   return /^[+\d\s()\-]+$/.test(value)
 }
 
-function stage(filePath: string): string {
+export function stage(filePath: string): string {
   const src = resolve(filePath.replace(/^~/, homedir()))
   if (!existsSync(src)) throw new Error(`Attachment not found: ${src}`)
 

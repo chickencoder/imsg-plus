@@ -225,58 +225,37 @@ static NSDictionary* handleRead(NSInteger requestId, NSDictionary *params) {
     }
 }
 
-#pragma mark - Contact-Card Send
+#pragma mark - Voice-Note Send
 //
-// handleSendContactCard
-// =====================
-// Sends a .vcf as a rich contact balloon (avatar + name + chevron pill) instead
-// of a generic file attachment. The receiver renders this via Messages.app's
-// `com.apple.messages.contact-card-extension` balloon plugin, which is only
-// triggered when the outgoing IMMessage carries a non-nil `balloonBundleID`
-// + `payloadData`. AppleScript can't set those, so we have to construct the
-// IMMessage in-process via IMCore and dispatch via [chat sendMessage:].
+// handleSendVoiceNote
+// ===================
+// Sends an audio file as a native iMessage voice note (waveform balloon with
+// play button) instead of a generic file pill. Voice notes do NOT use balloon
+// plugins — verified by inspecting received voice notes in chat.db, which
+// have `balloon_bundle_id = NULL` and `is_audio_message = 1`. Structurally
+// they are normal file-transfer messages with the audio-message flag set on
+// the IMMessage.
 //
-// SCHEMA NOTE — payload_data plist is not officially documented.
-// The schema in buildContactCardPayload below is a best-effort structure.
-// Before relying on this in production, verify against a captured ground-truth
-// message by sending a contact via Contacts.app's Share Contact, then:
-//   sqlite3 ~/Library/Messages/chat.db \
-//     "SELECT balloon_bundle_id, hex(payload_data) FROM message
-//        WHERE balloon_bundle_id LIKE '%contact%' ORDER BY ROWID DESC LIMIT 1"
-//   # then: xxd -r -p > /tmp/p.bin && plutil -convert xml1 /tmp/p.bin -o -
-// If the captured plist differs, update buildContactCardPayload accordingly.
+// FORMAT NOTE — TS side transcodes input to AAC mono 24 kHz m4a via
+// `afconvert` and stages it as `Audio Message.m4a` (the canonical filename
+// Apple clients use). We just attach the staged file here.
+//
+// The IMMessage is constructed with the same long-init shape as contact
+// cards, but without `balloonBundleID` / `payloadData`. Instead we pass the
+// IMFileTransfer GUID through `fileTransferGUIDs:` and set `isAudioMessage`
+// via KVC.
 
-static NSData* buildContactCardPayload(NSString *filename, NSData *vcardData) {
-    NSDictionary *plist = @{
-        @"bid": @"com.apple.messages.contact-card-extension",
-        @"filename": filename ?: @"contact.vcf",
-        @"vcard": vcardData,
-    };
-    NSError *error = nil;
-    NSData *data = [NSPropertyListSerialization
-        dataWithPropertyList:plist
-                      format:NSPropertyListBinaryFormat_v1_0
-                     options:0
-                       error:&error];
-    if (error) {
-        NSLog(@"[imsg-plus] Failed to serialize contact-card payload: %@", error);
-        return nil;
-    }
-    return data;
-}
-
-static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *params) {
+static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
-    NSString *vcardB64 = params[@"vcard_b64"];
-    NSString *filename = params[@"filename"] ?: @"contact.vcf";
+    NSString *audioPath = params[@"audio_path"];
 
-    if (!handle || !vcardB64) {
-        return errorResponse(requestId, @"Missing required parameters: handle, vcard_b64");
+    if (!handle || !audioPath) {
+        return errorResponse(requestId, @"Missing required parameters: handle, audio_path");
     }
 
-    NSData *vcardData = [[NSData alloc] initWithBase64EncodedString:vcardB64 options:0];
-    if (!vcardData || vcardData.length == 0) {
-        return errorResponse(requestId, @"vcard_b64 is empty or not valid base64");
+    if (![[NSFileManager defaultManager] fileExistsAtPath:audioPath]) {
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"Audio file not found: %@", audioPath]);
     }
 
     id chat = findChat(handle);
@@ -285,25 +264,52 @@ static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *pa
             [NSString stringWithFormat:@"Chat not found: %@", handle]);
     }
 
-    NSData *payloadData = buildContactCardPayload(filename, vcardData);
-    if (!payloadData) {
-        return errorResponse(requestId, @"Failed to build contact-card payload plist");
-    }
-
     Class IMMessageClass = NSClassFromString(@"IMMessage");
     if (!IMMessageClass) {
         return errorResponse(requestId, @"IMMessage class not found");
     }
 
+    Class IMFileTransferCenterClass = NSClassFromString(@"IMFileTransferCenter");
+    if (!IMFileTransferCenterClass) {
+        return errorResponse(requestId, @"IMFileTransferCenter class not found");
+    }
+
     @try {
+        // 1. Register the file with IMFileTransferCenter to get a transfer GUID.
+        // The exact selector varies by macOS version; probe the common shapes.
+        id transferCenter = [IMFileTransferCenterClass performSelector:@selector(sharedInstance)];
+        if (!transferCenter) {
+            return errorResponse(requestId, @"IMFileTransferCenter sharedInstance unavailable");
+        }
+
+        NSURL *fileURL = [NSURL fileURLWithPath:audioPath];
+        NSString *transferGUID = nil;
+
+        SEL guidForNewSel = @selector(guidForNewOutgoingTransferWithLocalURL:);
+        SEL guidForNewSel2 = @selector(guidForNewOutgoingTransferWithLocalURL:useLegacyGuid:);
+        if ([transferCenter respondsToSelector:guidForNewSel]) {
+            transferGUID = ((id (*)(id, SEL, id))objc_msgSend)(
+                transferCenter, guidForNewSel, fileURL);
+        } else if ([transferCenter respondsToSelector:guidForNewSel2]) {
+            transferGUID = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+                transferCenter, guidForNewSel2, fileURL, NO);
+        } else {
+            return errorResponse(requestId,
+                @"IMFileTransferCenter has no known guidForNewOutgoingTransfer selector");
+        }
+
+        if (!transferGUID) {
+            return errorResponse(requestId, @"Failed to register outgoing file transfer");
+        }
+
+        // 2. Build the IMMessage with the same long-init shape used for contact
+        //    cards (IMsgInjected.m above). Pass the transfer GUID through the
+        //    fileTransferGUIDs: slot. No balloonBundleID / payloadData — voice
+        //    notes don't use balloon plugins.
         id message = [IMMessageClass alloc];
         NSAttributedString *fallbackText =
-            [[NSAttributedString alloc] initWithString:@"Contact"];
+            [[NSAttributedString alloc] initWithString:@""];
 
-        // Construct via the long associated-message init (same shape used by
-        // tapbacks in the BlueBubbles approach) and apply balloon-plugin
-        // metadata via KVC. The balloon-aware init signature varies across
-        // macOS versions; KVC is more robust.
         SEL longInit = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:associatedMessageGUID:associatedMessageType:associatedMessageRange:messageSummaryInfo:);
         if ([message respondsToSelector:longInit]) {
             typedef id (*InitFn)(id, SEL,
@@ -313,7 +319,7 @@ static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *pa
                 long long, NSRange, id);
             InitFn fn = (InitFn)objc_msgSend;
             message = fn(message, longInit,
-                nil, nil, fallbackText, nil, nil,
+                nil, nil, fallbackText, nil, @[transferGUID],
                 (unsigned long long)0x5, nil,
                 nil, nil, nil,
                 0, NSMakeRange(0, 0), nil);
@@ -325,11 +331,20 @@ static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *pa
             return errorResponse(requestId, @"Failed to construct IMMessage");
         }
 
-        NSString *bundleID = @"com.apple.messages.contact-card-extension";
-        @try { [message setValue:bundleID forKey:@"balloonBundleID"]; }
-        @catch (NSException *e) { NSLog(@"[imsg-plus] setValue balloonBundleID failed: %@", e.reason); }
-        @try { [message setValue:payloadData forKey:@"payloadData"]; }
-        @catch (NSException *e) { NSLog(@"[imsg-plus] setValue payloadData failed: %@", e.reason); }
+        // 3. Flip the audio-message flag. KVC on IMMessage is the most likely
+        //    path; if that's not supported we'll surface the failure rather
+        //    than silently sending a file pill.
+        BOOL flagged = NO;
+        @try {
+            [message setValue:@YES forKey:@"isAudioMessage"];
+            flagged = YES;
+        } @catch (NSException *e) {
+            NSLog(@"[imsg-plus] setValue isAudioMessage on IMMessage failed: %@", e.reason);
+        }
+        if (!flagged) {
+            return errorResponse(requestId,
+                @"Could not set isAudioMessage on IMMessage — this macOS version may need a different selector");
+        }
 
         SEL sendSel = @selector(sendMessage:);
         if (![chat respondsToSelector:sendSel]) {
@@ -339,16 +354,14 @@ static NSDictionary* handleSendContactCard(NSInteger requestId, NSDictionary *pa
 
         return successResponse(requestId, @{
             @"handle": handle,
-            @"filename": filename,
-            @"bundle_id": bundleID,
-            @"payload_bytes": @(payloadData.length),
-            @"vcard_bytes": @(vcardData.length),
+            @"audio_path": audioPath,
+            @"transfer_guid": transferGUID,
         });
     } @catch (NSException *exception) {
-        NSLog(@"[imsg-plus] ❌ Exception in send_contact_card: %@\n%@",
+        NSLog(@"[imsg-plus] ❌ Exception in send_voice_note: %@\n%@",
               exception.reason, exception.callStackSymbols);
         return errorResponse(requestId,
-            [NSString stringWithFormat:@"send_contact_card failed: %@", exception.reason]);
+            [NSString stringWithFormat:@"send_voice_note failed: %@", exception.reason]);
     }
 }
 
@@ -382,7 +395,7 @@ static NSDictionary* processCommand(NSDictionary *command) {
 
     if ([action isEqualToString:@"typing"])             return handleTyping(requestId, params);
     if ([action isEqualToString:@"read"])               return handleRead(requestId, params);
-    if ([action isEqualToString:@"send_contact_card"])  return handleSendContactCard(requestId, params);
+    if ([action isEqualToString:@"send_voice_note"])    return handleSendVoiceNote(requestId, params);
     if ([action isEqualToString:@"status"])             return handleStatus(requestId);
     if ([action isEqualToString:@"ping"])               return successResponse(requestId, @{@"pong": @YES});
 

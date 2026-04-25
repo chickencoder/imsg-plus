@@ -29,7 +29,7 @@ export function createBridge(customDylib?: string) {
     dylibPath,
     setTyping,
     markRead,
-    sendContactCard,
+    sendVoiceNote,
     launch,
     kill,
   }
@@ -46,24 +46,22 @@ export function createBridge(customDylib?: string) {
     await command("read", { handle })
   }
 
-  // Throws when unavailable: contact-card rendering REQUIRES the dylib path,
-  // and silently degrading would deliver an inline file pill — exactly the bug
+  // Throws when unavailable: degrading to a plain file send would deliver a
+  // generic file pill instead of a native voice-note balloon — the exact bug
   // this method exists to fix.
-  async function sendContactCard(
+  async function sendVoiceNote(
     handle: string,
-    vcardData: Buffer,
-    filename: string
+    audioPath: string
   ): Promise<void> {
     if (!dylibPath) {
       throw new Error(
-        "contact-card send requires the IMCore dylib (SIP disabled + " +
+        "voice-note send requires the IMCore dylib (SIP disabled + " +
         "imsg-plus-helper.dylib loaded). Run `imsg-plus status` for setup."
       )
     }
-    await command("send_contact_card", {
+    await command("send_voice_note", {
       handle,
-      vcard_b64: vcardData.toString("base64"),
-      filename,
+      audio_path: audioPath,
     })
   }
 

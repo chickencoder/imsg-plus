@@ -83,29 +83,32 @@ No params.
 
 Result: `{ "pending": 0, "processing": 0, "sent": 5, "failed": 0 }`
 
-### `send.contactCard`
+### `send.voiceNote`
 
-Sends a `.vcf` as a rich contact balloon (avatar + name + chevron pill on the
-receiver) instead of a generic file attachment. Bypasses AppleScript and
-constructs the IMMessage directly via the IMCore dylib so `balloonBundleID` +
-`payloadData` can be set. Hard-fails when the dylib path is unavailable
-rather than degrading to a file pill, and is **not** queued — the call returns
-when Messages.app has accepted the message.
+Sends an audio file as a native iMessage voice note (waveform balloon with a
+play button on the receiver) instead of a generic file pill. Bypasses
+AppleScript and constructs the IMMessage directly via the IMCore dylib so
+`isAudioMessage` can be set on the message. The audio is transcoded to AAC
+mono 24 kHz m4a (the format current Apple clients produce) via the
+built-in `afconvert` before send. Hard-fails when the dylib path is
+unavailable rather than degrading to a file pill, and is **not** queued —
+the call returns when Messages.app has accepted the message.
 
 Params (direct):
 - `to` (string) — phone number or email
-- `vcard_path` (string, required) — path to the `.vcf`
+- `voice_note` (string, required) — path to an audio file (any format
+  `afconvert` supports: `.m4a`, `.mp3`, `.wav`, `.caf`, …)
 - `service` ("imessage", default "imessage") — SMS is rejected
 - `region` (string, default "US")
 
 Params (group/existing chat):
 - `chat_id` or `chat_identifier` or `chat_guid` (one required; `chat_id` preferred)
-- `vcard_path` / `service` / `region` as above
+- `voice_note` / `service` / `region` as above
 
 Result: `{ "ok": true }`
 
 Requires advanced features (SIP disabled + `imsg-plus-helper.dylib` injected
-into Messages.app). Check `imsg-plus status --json`'s `contact_card_send`
+into Messages.app). Check `imsg-plus status --json`'s `voice_note_send`
 field.
 
 ### `messages.react`

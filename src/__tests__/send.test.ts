@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest"
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { pickRecipient, normalize, looksLikeHandle, sendContactCard } from "../send.js"
+import { pickRecipient, normalize, looksLikeHandle, sendVoiceNote } from "../send.js"
 
 function makeBridge(overrides: Record<string, unknown> = {}) {
   return {
@@ -10,22 +10,11 @@ function makeBridge(overrides: Record<string, unknown> = {}) {
     dylibPath: "/fake/path.dylib",
     setTyping: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
-    sendContactCard: vi.fn().mockResolvedValue(undefined),
+    sendVoiceNote: vi.fn().mockResolvedValue(undefined),
     launch: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn(),
     ...overrides,
   } as any
-}
-
-function withTempVcard(contents: string, fn: (path: string) => Promise<void> | void): Promise<void> | void {
-  const dir = mkdtempSync(join(tmpdir(), "imsg-card-"))
-  const path = join(dir, "test.vcf")
-  writeFileSync(path, contents)
-  try {
-    return fn(path)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
 }
 
 describe("pickRecipient", () => {
@@ -133,57 +122,69 @@ describe("looksLikeHandle", () => {
   })
 })
 
-describe("sendContactCard", () => {
-  const VCARD = "BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nTEL:+15551234567\nEND:VCARD\n"
-
-  it("rejects --service sms (rich balloons don't render over SMS)", async () => {
-    await withTempVcard(VCARD, async (path) => {
-      await expect(
-        sendContactCard({ to: "+15551234567", contactCard: path, service: "sms" }, makeBridge())
-      ).rejects.toThrow(/SMS/)
-    })
+describe("sendVoiceNote", () => {
+  it("rejects --service sms (audio messages don't render over SMS)", async () => {
+    await expect(
+      sendVoiceNote({ to: "+15551234567", voiceNote: "/tmp/clip.m4a", service: "sms" }, makeBridge())
+    ).rejects.toThrow(/SMS/)
   })
 
-  it("throws when the .vcf file is missing", async () => {
+  it("throws when the audio file is missing", async () => {
     await expect(
-      sendContactCard({ to: "+15551234567", contactCard: "/no/such/file.vcf" }, makeBridge())
-    ).rejects.toThrow(/vCard not found/)
+      sendVoiceNote({ to: "+15551234567", voiceNote: "/no/such/audio.m4a" }, makeBridge())
+    ).rejects.toThrow(/audio not found/)
   })
 
   it("throws when the bridge dylib is unavailable", async () => {
-    await withTempVcard(VCARD, async (path) => {
-      const bridge = makeBridge({
-        available: false,
-        dylibPath: null,
-        sendContactCard: vi.fn().mockRejectedValue(new Error("dylib unavailable")),
-      })
+    const dir = mkdtempSync(join(tmpdir(), "imsg-audio-"))
+    const srcPath = join(dir, "clip.m4a")
+    writeFileSync(srcPath, Buffer.from("fake-audio"))
+
+    const runAfconvert = vi.fn((args: string[]) => {
+      writeFileSync(args[args.length - 1], Buffer.from("transcoded"))
+    })
+
+    const bridge = makeBridge({
+      available: false,
+      dylibPath: null,
+      sendVoiceNote: vi.fn().mockRejectedValue(new Error("dylib unavailable")),
+    })
+
+    try {
       await expect(
-        sendContactCard({ to: "+15551234567", contactCard: path }, bridge)
+        sendVoiceNote({ to: "+15551234567", voiceNote: srcPath, runAfconvert }, bridge)
       ).rejects.toThrow(/dylib/)
-    })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
-  it("dispatches to bridge.sendContactCard with the .vcf bytes and basename", async () => {
-    await withTempVcard(VCARD, async (path) => {
+  it("transcodes via afconvert and dispatches to bridge.sendVoiceNote with the staged path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "imsg-audio-"))
+    const srcPath = join(dir, "clip.m4a")
+    writeFileSync(srcPath, Buffer.from("fake-audio"))
+
+    const runAfconvert = vi.fn((args: string[]) => {
+      writeFileSync(args[args.length - 1], Buffer.from("transcoded"))
+    })
+
+    try {
       const bridge = makeBridge()
-      await sendContactCard({ to: "+15551234567", contactCard: path }, bridge)
-      expect(bridge.sendContactCard).toHaveBeenCalledTimes(1)
-      const [target, data, filename] = bridge.sendContactCard.mock.calls[0]
+      await sendVoiceNote({ to: "+15551234567", voiceNote: srcPath, runAfconvert }, bridge)
+
+      expect(runAfconvert).toHaveBeenCalledTimes(1)
+      const afconvertArgs = runAfconvert.mock.calls[0][0]
+      // Recipe: m4af, aac, mono, 32 kbps
+      expect(afconvertArgs).toEqual(expect.arrayContaining(["-f", "m4af", "-d", "aac", "-c", "1", "-b", "32000"]))
+
+      expect(bridge.sendVoiceNote).toHaveBeenCalledTimes(1)
+      const [target, stagedPath] = bridge.sendVoiceNote.mock.calls[0]
       expect(target).toBe("+15551234567")
-      expect(Buffer.isBuffer(data)).toBe(true)
-      expect(data.toString("utf8")).toBe(VCARD)
-      expect(filename).toBe("test.vcf")
-    })
-  })
-
-  it("uses chat_guid as the dylib target when set", async () => {
-    await withTempVcard(VCARD, async (path) => {
-      const bridge = makeBridge()
-      await sendContactCard(
-        { chatGuid: "iMessage;+;chat999", contactCard: path },
-        bridge
-      )
-      expect(bridge.sendContactCard.mock.calls[0][0]).toBe("iMessage;+;chat999")
-    })
+      // Staged with the canonical Apple filename
+      expect(stagedPath).toMatch(/Audio Message\.m4a$/)
+    } finally {
+      vi.restoreAllMocks()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

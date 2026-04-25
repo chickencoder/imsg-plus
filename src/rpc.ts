@@ -5,7 +5,7 @@ import type { Chat, Service } from "./types.js"
 import { serializeMessage, serializeUndelivered } from "./json.js"
 import { parseFilter } from "./filter.js"
 import { watch } from "./watch.js"
-import { send, sendContactCard, react, type TapbackType } from "./send.js"
+import { send, sendVoiceNote, stage, react, type TapbackType } from "./send.js"
 import { openQueue, type QueueDB } from "./queue.js"
 import { runWorker } from "./worker.js"
 
@@ -270,13 +270,20 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     },
 
     send(p) {
+      // Stage the file synchronously at enqueue time. The worker may run
+      // seconds-to-minutes later; by then the caller's source path could be
+      // gone (e.g. an HTTP daemon writing to /tmp and cleaning up after the
+      // RPC returns). Staging now copies the bytes into the persistent
+      // attachment dir so the worker can read them whenever it picks the job up.
+      const rawFile = str(p.file) ?? undefined
+      const stagedFile = rawFile ? stage(rawFile) : undefined
       const { job, duplicate } = queue.enqueue({
         to: str(p.to) ?? undefined,
         chatId: int(p.chat_id) ?? undefined,
         chatIdentifier: str(p.chat_identifier) ?? undefined,
         chatGuid: str(p.chat_guid) ?? undefined,
         text: str(p.text) ?? undefined,
-        file: str(p.file) ?? undefined,
+        file: stagedFile,
         service: (str(p.service) ?? "auto") as Service,
         region: str(p.region) ?? undefined,
         idempotencyKey: str(p.idempotency_key) ?? undefined,
@@ -288,16 +295,16 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
       return queue.counts()
     },
 
-    async "send.contactCard"(p) {
-      const vcardPath = need(str(p.vcard_path), "vcard_path")
+    async "send.voiceNote"(p) {
+      const voiceNote = need(str(p.voice_note), "voice_note")
       const service = (str(p.service) ?? "imessage") as Service
-      await sendContactCard(
+      await sendVoiceNote(
         {
           to: str(p.to) ?? undefined,
           chatId: int(p.chat_id) ?? undefined,
           chatIdentifier: str(p.chat_identifier) ?? undefined,
           chatGuid: str(p.chat_guid) ?? undefined,
-          contactCard: vcardPath,
+          voiceNote,
           service,
           region: str(p.region) ?? undefined,
         },
