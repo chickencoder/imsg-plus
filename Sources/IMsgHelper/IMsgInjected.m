@@ -312,7 +312,22 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
         // Messages.app moves outgoing attachments under ~/Library/Messages/Attachments
         // before sending. Skipping this step makes registerTransferWithDaemon: fail
         // silently because the source path isn't visible to the daemon's sandbox.
+        //
+        // chatGUID: must be the resolved chat's GUID — the persistence controller
+        // uses it to pick the per-chat attachment subdirectory. Passing nil makes
+        // the function return nil immediately because it can't compute a base dir.
+        // storeAtExternalPath: NO — "external" is iCloud / shared-container
+        // storage and silently no-ops when iCloud Messages isn't set up; we want
+        // the local per-chat dir under ~/Library/Messages/Attachments.
         NSString *filename = [audioPath lastPathComponent];
+        NSString *chatGUID = nil;
+        if ([chat respondsToSelector:@selector(guid)]) {
+            chatGUID = [chat performSelector:@selector(guid)];
+        }
+        if (!chatGUID) {
+            return errorResponse(requestId,
+                @"resolved chat has no GUID — cannot compute attachment path");
+        }
         id persistenceController =
             [IMDPersistentAttachmentControllerClass performSelector:@selector(sharedInstance)];
         SEL persistentPathSel =
@@ -326,9 +341,15 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
         PersistentPathFn persistentPathFn = (PersistentPathFn)objc_msgSend;
         NSString *persistentPath = persistentPathFn(
             persistenceController, persistentPathSel,
-            transfer, filename, YES, nil, YES);
+            transfer, filename, YES, chatGUID, NO);
         if (!persistentPath) {
-            return errorResponse(requestId, @"Failed to compute persistent attachment path");
+            NSLog(@"[imsg-plus] _persistentPathForTransfer returned nil "
+                  @"(filename=%@, chatGUID=%@, transfer=%@)",
+                  filename, chatGUID, transfer);
+            return errorResponse(requestId,
+                [NSString stringWithFormat:
+                 @"Failed to compute persistent attachment path "
+                 @"(chatGUID=%@, filename=%@)", chatGUID, filename]);
         }
 
         // Copy the staged source into the persistent path.
