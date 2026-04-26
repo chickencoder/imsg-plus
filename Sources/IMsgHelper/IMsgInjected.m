@@ -330,9 +330,26 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
         // balloonBundleID:payloadData:expressiveSendStyleID: rather than
         // associatedMessageGUID:... — and it's the one that lets the audio
         // flag bit (0x200000) actually take effect.
+        //
+        // The attributed body is REQUIRED: Apple's voice notes encode a
+        // U+FFFC (Object Replacement Character) carrying the file-transfer
+        // GUID as an attribute, which is what wires the audio attachment
+        // into the message's display position. Without it the receiver
+        // renders an empty bubble — even with is_audio_message=1, the right
+        // flags, a perfect Opus CAF, and is_sent=is_delivered=1 in chat.db.
+        // Verified by dumping Apple's attributedBody (383 bytes) for a
+        // received voice note: it contains @"￼" with attributes
+        // __kIMFileTransferGUIDAttributeName=at_0_<guid>, IMAudioTranscription,
+        // __kIMBaseWritingDirectionAttributeName, __kIMMessagePartAttributeName.
         id message = [IMMessageClass alloc];
-        NSAttributedString *emptyText =
-            [[NSAttributedString alloc] initWithString:@""];
+        NSString *transferAttrValue =
+            [NSString stringWithFormat:@"at_0_%@", transferGUID];
+        NSDictionary *attrs = @{
+            @"__kIMFileTransferGUIDAttributeName": transferAttrValue,
+            @"__kIMMessagePartAttributeName": @0,
+        };
+        NSAttributedString *attributedBody =
+            [[NSAttributedString alloc] initWithString:@"￼" attributes:attrs];
         unsigned long long flags = 0x300005ULL; // 0x100005 (file) | 0x200000 (audio)
 
         SEL bbInit = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:balloonBundleID:payloadData:expressiveSendStyleID:);
@@ -347,7 +364,7 @@ static NSDictionary* handleSendVoiceNote(NSInteger requestId, NSDictionary *para
             id, id, id);
         BBInitFn bbInitFn = (BBInitFn)objc_msgSend;
         message = bbInitFn(message, bbInit,
-            nil, nil, emptyText, nil, @[transferGUID],
+            nil, nil, attributedBody, nil, @[transferGUID],
             flags, nil,
             nil, nil,
             nil, nil, nil);
