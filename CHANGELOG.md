@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.1 - 2026-05-01
+
+- fix: implement the missing `send_reply` action in the IMCore dylib (`IMsgHelper/IMsgInjected.m`). 2.3.0 wired the TS pipeline through `bridge.sendReply` but the dylib's command router only knew `typing`/`read`/`react`/`send_voice_note`/`status`/`ping`, so every reply job failed with `Unknown action: send_reply` from the worker. The new handler constructs an `IMMessage` via the thread-aware `initWithSender:…:threadIdentifier:` initializer (threadIdentifier set to `p:0/<reply_to_guid>`) and dispatches via `[chat sendMessage:]`, the same primitive `react` and `send_voice_note` use.
+
 ## 2.3.0 - 2026-05-01
 
 - feat: `send` RPC now accepts `reply_to` (target message GUID); jobs with it set dispatch through the dylib bridge as threaded replies. AppleScript can't thread, so this requires the IMCore dylib (and a `send_reply` handler in the dylib — see IMsgHelper/IMsgInjected.m for the existing pattern used by `react`/`send_voice_note`).

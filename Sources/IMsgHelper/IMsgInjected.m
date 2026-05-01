@@ -696,6 +696,100 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
     return nil; // async — completion block writes the response
 }
 
+#pragma mark - Threaded Reply
+//
+// IMMessage exposes a thread-aware initializer
+// `initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:threadIdentifier:`
+// that sets the message's `_threadIdentifier` ivar at construction time.
+// Once sent via `[chat sendMessage:]`, imagent persists the thread linkage
+// into chat.db's `thread_originator_guid` column, which is how Messages.app
+// renders the bubble as a threaded reply on both ends.
+//
+// `threadIdentifier` is the chat.db `p:N/<guid>` form where N is the part
+// index of the parent message part being replied to. We always reply to part
+// 0 — multi-part bubbles (text + attachments in one balloon) are rare and the
+// public API doesn't surface a partIndex today.
+//
+// Unlike `react`, `send_reply` does NOT need to load the parent message via
+// IMChatHistoryController to build a summary string — the parent GUID alone
+// is enough to thread.
+
+static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) {
+    NSString *handle = params[@"handle"];
+    NSString *text = params[@"text"];
+    NSString *replyToGuid = params[@"reply_to_guid"];
+
+    if (!handle || !text || !replyToGuid) {
+        return errorResponse(requestId, @"Missing required parameters: handle, text, reply_to_guid");
+    }
+    if (text.length == 0) {
+        return errorResponse(requestId, @"text must be non-empty");
+    }
+
+    id chat = findChat(handle);
+    if (!chat) {
+        return errorResponse(requestId, [NSString stringWithFormat:@"Chat not found: %@", handle]);
+    }
+
+    Class IMMessageClass = NSClassFromString(@"IMMessage");
+    if (!IMMessageClass) {
+        return errorResponse(requestId, @"IMMessage class not found");
+    }
+
+    @try {
+        NSString *threadIdentifier = [NSString stringWithFormat:@"p:0/%@", replyToGuid];
+        NSAttributedString *attributedBody = [[NSAttributedString alloc] initWithString:text];
+
+        SEL initSel = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:threadIdentifier:);
+        id message = [IMMessageClass alloc];
+        if (![message respondsToSelector:initSel]) {
+            return errorResponse(requestId,
+                @"IMMessage missing initWithSender:...:threadIdentifier: selector — macOS may need a different signature");
+        }
+
+        typedef id (*ReplyInitFn)(id, SEL,
+            id,                  // sender
+            id,                  // time
+            id,                  // text (NSAttributedString)
+            id,                  // messageSubject
+            id,                  // fileTransferGUIDs
+            unsigned long long,  // flags
+            id,                  // error
+            id,                  // guid
+            id,                  // subject
+            id                   // threadIdentifier
+        );
+        ReplyInitFn replyInit = (ReplyInitFn)objc_msgSend;
+        message = replyInit(message, initSel,
+            nil, nil, attributedBody, nil, nil,
+            (unsigned long long)0x5, nil,
+            nil, nil,
+            threadIdentifier
+        );
+
+        if (!message) {
+            return errorResponse(requestId, @"Failed to construct reply IMMessage (init returned nil)");
+        }
+
+        SEL sendSel = @selector(sendMessage:);
+        if (![chat respondsToSelector:sendSel]) {
+            return errorResponse(requestId, @"Chat does not respond to sendMessage:");
+        }
+        [chat performSelector:sendSel withObject:message];
+
+        return successResponse(requestId, @{
+            @"handle": handle,
+            @"reply_to_guid": replyToGuid,
+            @"thread_identifier": threadIdentifier,
+        });
+    } @catch (NSException *exception) {
+        NSLog(@"[imsg-plus] Exception in send_reply: %@\n%@",
+              exception.reason, exception.callStackSymbols);
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"send_reply failed: %@", exception.reason]);
+    }
+}
+
 #pragma mark - Command Router
 
 static NSDictionary* processCommand(NSDictionary *command) {
@@ -708,6 +802,7 @@ static NSDictionary* processCommand(NSDictionary *command) {
     if ([action isEqualToString:@"typing"])             return handleTyping(requestId, params);
     if ([action isEqualToString:@"read"])               return handleRead(requestId, params);
     if ([action isEqualToString:@"react"])              return handleReact(requestId, params);
+    if ([action isEqualToString:@"send_reply"])         return handleSendReply(requestId, params);
     if ([action isEqualToString:@"send_voice_note"])    return handleSendVoiceNote(requestId, params);
     if ([action isEqualToString:@"status"])             return handleStatus(requestId);
     if ([action isEqualToString:@"ping"])               return successResponse(requestId, @{@"pong": @YES});
