@@ -801,15 +801,17 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
         NSString *traceStr = [trace componentsJoinedByString:@" | "];
         NSLog(@"[imsg-plus] send_reply trace: %@", traceStr);
 
-        // Append diagnostic to /tmp so the host can read it without needing
-        // unified-log access (Messages.app's NSLog goes to a sandboxed process).
+        // Append diagnostic next to the existing IPC files in the
+        // Messages.app container — /tmp is redirected/blocked by the sandbox
+        // and NSLog from a dylib injected into Messages.app gets swallowed.
+        NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"imsg-plus-send-reply.log"];
         NSString *logLine = [NSString stringWithFormat:@"%@ guid=%@ %@\n",
             [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
             replyToGuid, traceStr];
-        [[NSFileManager defaultManager] createFileAtPath:@"/tmp/imsg-plus-send-reply.log"
-                                                contents:nil
-                                              attributes:nil];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/tmp/imsg-plus-send-reply.log"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (fh) {
             [fh seekToEndOfFile];
             [fh writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
