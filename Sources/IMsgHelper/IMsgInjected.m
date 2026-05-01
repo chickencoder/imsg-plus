@@ -771,21 +771,50 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
             return errorResponse(requestId, @"Failed to construct reply IMMessage (init returned nil)");
         }
 
-        // Belt-and-braces: some IMMessage initializers accept threadIdentifier
-        // as a parameter but don't actually persist it (the param is consumed
-        // by an internal path that requires additional context). Setting it
-        // explicitly after init guarantees `_threadIdentifier` is populated
-        // before [chat sendMessage:] hands the message to imagent.
+        // Diagnostic: capture threadIdentifier state at three points to
+        // localize where threading is being lost.
+        NSMutableArray<NSString *> *trace = [NSMutableArray array];
+        SEL getThreadSel = @selector(threadIdentifier);
+        if ([message respondsToSelector:getThreadSel]) {
+            NSString *afterInit = [message performSelector:getThreadSel];
+            [trace addObject:[NSString stringWithFormat:@"after-init=%@", afterInit ?: @"<nil>"]];
+        }
+
         SEL setThreadSel = @selector(setThreadIdentifier:);
         if ([message respondsToSelector:setThreadSel]) {
             [message performSelector:setThreadSel withObject:threadIdentifier];
         }
-        NSString *postInitThreadId = nil;
-        SEL getThreadSel = @selector(threadIdentifier);
         if ([message respondsToSelector:getThreadSel]) {
-            postInitThreadId = [message performSelector:getThreadSel];
+            NSString *afterSetter = [message performSelector:getThreadSel];
+            [trace addObject:[NSString stringWithFormat:@"after-setter=%@", afterSetter ?: @"<nil>"]];
         }
-        NSLog(@"[imsg-plus] send_reply: threadIdentifier=%@ post-init=%@", threadIdentifier, postInitThreadId);
+
+        // Try the private ivar directly via KVC as a fallback.
+        @try {
+            [message setValue:threadIdentifier forKey:@"_threadIdentifier"];
+        } @catch (__unused NSException *kvcEx) {}
+        if ([message respondsToSelector:getThreadSel]) {
+            NSString *afterKvc = [message performSelector:getThreadSel];
+            [trace addObject:[NSString stringWithFormat:@"after-kvc=%@", afterKvc ?: @"<nil>"]];
+        }
+
+        NSString *traceStr = [trace componentsJoinedByString:@" | "];
+        NSLog(@"[imsg-plus] send_reply trace: %@", traceStr);
+
+        // Append diagnostic to /tmp so the host can read it without needing
+        // unified-log access (Messages.app's NSLog goes to a sandboxed process).
+        NSString *logLine = [NSString stringWithFormat:@"%@ guid=%@ %@\n",
+            [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
+            replyToGuid, traceStr];
+        [[NSFileManager defaultManager] createFileAtPath:@"/tmp/imsg-plus-send-reply.log"
+                                                contents:nil
+                                              attributes:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/tmp/imsg-plus-send-reply.log"];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
 
         SEL sendSel = @selector(sendMessage:);
         if (![chat respondsToSelector:sendSel]) {
@@ -797,7 +826,7 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
             @"handle": handle,
             @"reply_to_guid": replyToGuid,
             @"thread_identifier": threadIdentifier,
-            @"post_init_thread_identifier": postInitThreadId ?: [NSNull null],
+            @"trace": traceStr,
         });
     } @catch (NSException *exception) {
         NSLog(@"[imsg-plus] Exception in send_reply: %@\n%@",
