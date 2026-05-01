@@ -274,36 +274,21 @@ export interface ReactOptions {
   type: TapbackType
   service?: "imessage" | "sms"
   region?: string
+  partIndex?: number
 }
 
-export async function react(opts: ReactOptions): Promise<void> {
+// Reactions go through the dylib, not AppleScript: Messages.app's scripting
+// dictionary has no `tapback` parameter on `send`, so the AppleScript path
+// fails to compile. The dylib builds an IMMessage with associated-message
+// fields directly via IMCore.
+export async function react(opts: ReactOptions, bridge: Bridge): Promise<void> {
   if (!TAPBACK_MAP[opts.type]) throw new Error(`Unknown tapback type: ${opts.type}`)
 
-  const service = opts.service ?? "imessage"
   const recipient = normalize(opts.to, opts.region ?? "US")
   const tapbackIndex = TAPBACK_MAP[opts.type]
 
-  await osascript(REACT_SCRIPT, [recipient, opts.guid, String(tapbackIndex), service])
+  await bridge.react(recipient, opts.guid, tapbackIndex, opts.partIndex)
 }
-
-const REACT_SCRIPT = `
-on run argv
-    set theRecipient to item 1 of argv
-    set theGuid to item 2 of argv
-    set tapbackType to item 3 of argv as integer
-    set theService to item 4 of argv
-
-    tell application "Messages"
-        if theService is "sms" then
-            set targetService to first service whose service type is SMS
-        else
-            set targetService to first service whose service type is iMessage
-        end if
-        set targetBuddy to buddy theRecipient of targetService
-        send theGuid to targetBuddy with tapback tapbackType
-    end tell
-end run
-`.trim()
 
 // Pure function: options in → exactly one of recipient/chatTarget out
 

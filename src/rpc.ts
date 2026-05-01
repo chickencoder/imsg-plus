@@ -323,7 +323,17 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
       const validTypes = ["love", "like", "dislike", "laugh", "emphasis", "question"]
       if (!validTypes.includes(type)) throw new InvalidParams(`type must be one of: ${validTypes.join(", ")}`)
 
-      await react({ to, guid, type, service: (str(p.service) ?? "imessage") as any, region: str(p.region) ?? undefined })
+      const partIndexRaw = (p as { partIndex?: unknown }).partIndex
+      const partIndex = typeof partIndexRaw === "number" ? partIndexRaw : undefined
+
+      await react({
+        to,
+        guid,
+        type,
+        service: (str(p.service) ?? "imessage") as any,
+        region: str(p.region) ?? undefined,
+        partIndex,
+      }, bridge)
       return { ok: true }
     },
 

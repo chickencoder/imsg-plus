@@ -31,6 +31,7 @@ export function createBridge(customDylib?: string) {
     markRead,
     sendVoiceNote,
     sendReply,
+    react,
     launch,
     kill,
   }
@@ -45,6 +46,25 @@ export function createBridge(customDylib?: string) {
   async function markRead(handle: string): Promise<void> {
     if (!dylibPath) return
     await command("read", { handle })
+  }
+
+  // Throws when unavailable: AppleScript can't send tapbacks (Messages.app's
+  // sdef has no `tapback` parameter), so we only have one viable path.
+  async function react(
+    handle: string,
+    guid: string,
+    type: number,
+    partIndex?: number
+  ): Promise<void> {
+    if (!dylibPath) {
+      throw new Error(
+        "react requires the IMCore dylib (SIP disabled + " +
+        "imsg-plus-helper.dylib loaded). Run `imsg-plus status` for setup."
+      )
+    }
+    // 10s outer cap — the dylib has its own 5s safety net for the
+    // loadMessageWithGUID completion, plus headroom for IPC + sendMessage:.
+    await command("react", { handle, guid, type, partIndex: partIndex ?? 0 }, 10_000)
   }
 
   // Throws when unavailable: AppleScript can't thread replies (Messages.app's

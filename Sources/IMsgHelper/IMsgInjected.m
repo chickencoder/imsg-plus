@@ -51,6 +51,11 @@ static void initFilePaths(void) {
 - (NSString *)ID;
 @end
 
+@interface IMChatHistoryController : NSObject
++ (instancetype)sharedInstance;
+- (void)loadMessageWithGUID:(NSString *)guid completionBlock:(void (^)(id message))completion;
+@end
+
 #pragma mark - Runtime Compatibility
 
 static BOOL IMMessageItem_isEditedMessageHistory(id self, SEL _cmd) {
@@ -447,6 +452,250 @@ static NSDictionary* handleStatus(NSInteger requestId) {
     });
 }
 
+#pragma mark - Async Response Helper
+
+// For handlers whose work completes outside the synchronous processCommand path
+// (e.g. handleReact's IMChatHistoryController completion block). Writes the
+// response and clears the command file the same way processCommandFile would.
+static void writeResponseToFile(NSDictionary *response) {
+    initFilePaths();
+    NSData *responseData = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
+    [responseData writeToFile:kResponseFile atomically:YES];
+    [@"" writeToFile:kCommandFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+// Map a reaction code (2000–2005 added, 3000–3005 removed) to the verb prefix
+// Messages.app uses in tapback summary text ("Loved …", "Liked …", etc.).
+static NSString* reactionVerb(long long reactionType) {
+    long long baseType = reactionType >= 3000 ? reactionType - 1000 : reactionType;
+    switch (baseType) {
+        case 2000: return @"Loved ";
+        case 2001: return @"Liked ";
+        case 2002: return @"Disliked ";
+        case 2003: return @"Laughed at ";
+        case 2004: return @"Emphasized ";
+        case 2005: return @"Questioned ";
+        default:   return @"Reacted to ";
+    }
+}
+
+#pragma mark - Reactions
+
+// Returns nil to signal async handling — the completion block writes the
+// response via writeResponseToFile().
+static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
+    NSString *handle = params[@"handle"];
+    NSString *messageGUID = params[@"guid"];
+    NSNumber *type = params[@"type"];
+    NSNumber *partIndexNum = params[@"partIndex"];
+    int partIndex = partIndexNum ? [partIndexNum intValue] : 0;
+
+    if (!handle || !messageGUID || !type) {
+        return errorResponse(requestId, @"Missing required parameters: handle, guid, type");
+    }
+
+    id chat = findChat(handle);
+    if (!chat) {
+        return errorResponse(requestId, [NSString stringWithFormat:@"Chat not found: %@", handle]);
+    }
+
+    Class historyClass = NSClassFromString(@"IMChatHistoryController");
+    if (!historyClass) {
+        return errorResponse(requestId, @"IMChatHistoryController class not found");
+    }
+
+    id historyController = [historyClass performSelector:@selector(sharedInstance)];
+    if (!historyController) {
+        return errorResponse(requestId, @"Could not get IMChatHistoryController instance");
+    }
+
+    SEL loadSel = @selector(loadMessageWithGUID:completionBlock:);
+    if (![historyController respondsToSelector:loadSel]) {
+        return errorResponse(requestId, @"loadMessageWithGUID:completionBlock: not available");
+    }
+
+    NSLog(@"[imsg-plus] Loading message %@ via IMChatHistoryController (async)...", messageGUID);
+
+    long long reactionType = [type longLongValue];
+
+    NSMethodSignature *loadSig = [historyController methodSignatureForSelector:loadSel];
+    if (!loadSig) {
+        return errorResponse(requestId, @"Could not get method signature for loadMessageWithGUID:completionBlock:");
+    }
+    NSInvocation *loadInv = [NSInvocation invocationWithMethodSignature:loadSig];
+    [loadInv setSelector:loadSel];
+    [loadInv setTarget:historyController];
+    [loadInv setArgument:&messageGUID atIndex:2];
+
+    void (^completionBlock)(id) = ^(id message) {
+        @autoreleasepool {
+            NSLog(@"[imsg-plus] loadMessageWithGUID completion fired, message=%@, class=%@",
+                  message, message ? NSStringFromClass([message class]) : @"nil");
+
+            if (!message) {
+                writeResponseToFile(errorResponse(requestId,
+                    [NSString stringWithFormat:@"Message not found for GUID: %@", messageGUID]));
+                return;
+            }
+
+            @try {
+                id messageItem = [message valueForKey:@"_imMessageItem"];
+
+                id items = nil;
+                if (messageItem && [messageItem respondsToSelector:@selector(_newChatItems)]) {
+                    items = [messageItem performSelector:@selector(_newChatItems)];
+                } else if (messageItem) {
+                    items = [messageItem valueForKey:@"_newChatItems"];
+                }
+
+                id partItem = nil;
+                if ([items isKindOfClass:[NSArray class]]) {
+                    NSArray *itemArray = (NSArray *)items;
+                    for (id item in itemArray) {
+                        NSString *className = NSStringFromClass([item class]);
+                        if ([className containsString:@"MessagePartChatItem"] ||
+                            [className containsString:@"TextMessagePartChatItem"]) {
+                            if ([item respondsToSelector:@selector(index)]) {
+                                NSInteger idx = ((NSInteger (*)(id, SEL))objc_msgSend)(item, @selector(index));
+                                if (idx == partIndex) { partItem = item; break; }
+                            } else if (partIndex == 0) {
+                                partItem = item; break;
+                            }
+                        }
+                    }
+                    if (!partItem && itemArray.count > 0) {
+                        partItem = itemArray[partIndex < (int)itemArray.count ? partIndex : 0];
+                    }
+                } else if (items) {
+                    partItem = items;
+                }
+
+                NSAttributedString *itemText = nil;
+                if (partItem && [partItem respondsToSelector:@selector(text)]) {
+                    itemText = [partItem performSelector:@selector(text)];
+                }
+                if (!itemText && [message respondsToSelector:@selector(text)]) {
+                    itemText = [message performSelector:@selector(text)];
+                }
+                NSString *summaryText = itemText ? itemText.string : @"";
+                if (!summaryText) summaryText = @"";
+
+                NSString *associatedGuid = [NSString stringWithFormat:@"p:%d/%@", partIndex, messageGUID];
+                NSDictionary *messageSummary = @{@"amc": @1, @"ams": summaryText};
+
+                NSString *verb = reactionVerb(reactionType);
+                NSString *reactionString = [verb stringByAppendingString:
+                    [NSString stringWithFormat:@"“%@”", summaryText]];
+                NSMutableAttributedString *reactionText =
+                    [[NSMutableAttributedString alloc] initWithString:reactionString];
+
+                NSRange partRange = NSMakeRange(0, summaryText.length);
+                if (partItem) {
+                    SEL rangeSel = @selector(messagePartRange);
+                    if ([partItem respondsToSelector:rangeSel]) {
+                        NSMethodSignature *sig = [partItem methodSignatureForSelector:rangeSel];
+                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setSelector:rangeSel];
+                        [inv setTarget:partItem];
+                        [inv invoke];
+                        [inv getReturnValue:&partRange];
+                    }
+                }
+
+                Class IMMessageClass = NSClassFromString(@"IMMessage");
+                if (!IMMessageClass) {
+                    writeResponseToFile(errorResponse(requestId, @"IMMessage class not found"));
+                    return;
+                }
+
+                id reactionMessage = [IMMessageClass alloc];
+
+                SEL initSel = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:associatedMessageGUID:associatedMessageType:associatedMessageRange:messageSummaryInfo:);
+
+                if (![reactionMessage respondsToSelector:initSel]) {
+                    writeResponseToFile(errorResponse(requestId,
+                        @"IMMessage initWithSender:time:text:...associatedMessage... selector not found"));
+                    return;
+                }
+
+                typedef id (*InitMsgSendType)(id, SEL,
+                    id,                  // sender
+                    id,                  // time
+                    id,                  // text
+                    id,                  // messageSubject
+                    id,                  // fileTransferGUIDs
+                    unsigned long long,  // flags
+                    id,                  // error
+                    id,                  // guid
+                    id,                  // subject
+                    id,                  // associatedMessageGUID
+                    long long,           // associatedMessageType
+                    NSRange,             // associatedMessageRange
+                    id                   // messageSummaryInfo
+                );
+
+                InitMsgSendType initMsgSend = (InitMsgSendType)objc_msgSend;
+                reactionMessage = initMsgSend(reactionMessage, initSel,
+                    nil,                     // sender
+                    nil,                     // time
+                    reactionText,            // text
+                    nil,                     // messageSubject
+                    nil,                     // fileTransferGUIDs
+                    (unsigned long long)0x5, // flags
+                    nil,                     // error
+                    nil,                     // guid
+                    nil,                     // subject
+                    associatedGuid,          // associatedMessageGUID
+                    reactionType,            // associatedMessageType
+                    partRange,               // associatedMessageRange
+                    messageSummary           // messageSummaryInfo
+                );
+
+                if (!reactionMessage) {
+                    writeResponseToFile(errorResponse(requestId, @"Failed to create reaction IMMessage (init returned nil)"));
+                    return;
+                }
+
+                SEL sendSel = @selector(sendMessage:);
+                if (![chat respondsToSelector:sendSel]) {
+                    writeResponseToFile(errorResponse(requestId, @"Chat does not respond to sendMessage:"));
+                    return;
+                }
+
+                [chat performSelector:sendSel withObject:reactionMessage];
+
+                writeResponseToFile(successResponse(requestId, @{
+                    @"handle": handle,
+                    @"guid": messageGUID,
+                    @"type": type,
+                    @"partIndex": @(partIndex),
+                    @"action": reactionType >= 3000 ? @"removed" : @"added"
+                }));
+            } @catch (NSException *exception) {
+                NSLog(@"[imsg-plus] Exception in react completion: %@\n%@", exception.reason, exception.callStackSymbols);
+                writeResponseToFile(errorResponse(requestId,
+                    [NSString stringWithFormat:@"Failed in react completion: %@", exception.reason]));
+            }
+        }
+    };
+
+    [loadInv setArgument:&completionBlock atIndex:3];
+    [loadInv invoke];
+
+    // 5s safety net: if loadMessageWithGUID's completion never fires, write an
+    // error so the caller doesn't hang.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        NSData *responseData = [NSData dataWithContentsOfFile:kResponseFile];
+        if (!responseData || responseData.length < 3) {
+            NSLog(@"[imsg-plus] React completion timeout after 5s for GUID: %@", messageGUID);
+            writeResponseToFile(errorResponse(requestId,
+                [NSString stringWithFormat:@"Timeout: message GUID not found or completion never fired: %@", messageGUID]));
+        }
+    });
+
+    return nil; // async — completion block writes the response
+}
+
 #pragma mark - Command Router
 
 static NSDictionary* processCommand(NSDictionary *command) {
@@ -458,6 +707,7 @@ static NSDictionary* processCommand(NSDictionary *command) {
 
     if ([action isEqualToString:@"typing"])             return handleTyping(requestId, params);
     if ([action isEqualToString:@"read"])               return handleRead(requestId, params);
+    if ([action isEqualToString:@"react"])              return handleReact(requestId, params);
     if ([action isEqualToString:@"send_voice_note"])    return handleSendVoiceNote(requestId, params);
     if ([action isEqualToString:@"status"])             return handleStatus(requestId);
     if ([action isEqualToString:@"ping"])               return successResponse(requestId, @{@"pong": @YES});
@@ -485,6 +735,10 @@ static void processCommandFile(void) {
         }
 
         NSDictionary *result = processCommand(command);
+        if (!result) {
+            // Async handler — it will writeResponseToFile() when done.
+            return;
+        }
         NSData *responseData = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
         [responseData writeToFile:kResponseFile atomically:YES];
         [@"" writeToFile:kCommandFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
