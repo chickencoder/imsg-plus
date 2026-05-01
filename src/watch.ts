@@ -7,16 +7,20 @@ export interface WatchOptions {
   sinceRowId?: number
   debounce?: number
   filter?: Filter
+  // When true, surface tapback (reaction) rows alongside regular messages.
+  // Defaults false to preserve the existing CLI viewer experience.
+  includeReactions?: boolean
 }
 
 export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Message> {
   let cursor = opts.sinceRowId ?? db.maxRowId()
   const interval = opts.debounce ?? 250
   const filter = opts.filter
+  const includeReactions = opts.includeReactions ?? false
 
   // Poll for new messages (filters are pushed into the SQL query)
   function poll(): Message[] {
-    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100, filter })
+    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100, filter, includeReactions })
     for (const msg of msgs) {
       if (msg.id > cursor) cursor = msg.id
     }

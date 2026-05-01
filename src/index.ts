@@ -42,6 +42,7 @@ const args = arg(
     "--chat-guid": String,
     "--guid": String,
     "--type": String,
+    "--part-index": String,
     "--handle": String,
     "--state": String,
     "--dylib": String,
@@ -52,6 +53,7 @@ const args = arg(
     "--no-auto-typing": Boolean,
     "--poll": Number,
     "--retries": Number,
+    "--include-reactions": Boolean,
     "-h": "--help",
     "-V": "--version",
   },
@@ -136,7 +138,7 @@ function historyCmd() {
 
   const db = openDB()
   const showAttachments = args["--attachments"] ?? false
-  for (const msg of db.messages(chatId, { limit: args["--limit"] ?? 50, filter: buildFilter() })) {
+  for (const msg of db.messages(chatId, { limit: args["--limit"] ?? 50, filter: buildFilter(), includeReactions: args["--include-reactions"] ?? false })) {
     printMessage(msg, showAttachments ? db.attachments(msg.id) : [])
   }
 }
@@ -149,6 +151,7 @@ async function watchCmd() {
     sinceRowId: args["--since-rowid"],
     debounce: args["--debounce"] ?? 250,
     filter: buildFilter(),
+    includeReactions: args["--include-reactions"] ?? false,
   })) {
     printMessage(msg, showAttachments ? db.attachments(msg.id) : [])
   }
@@ -284,13 +287,17 @@ async function reactCmd() {
   if (!type) bail("--type is required (love, like, dislike, laugh, emphasis, question)")
 
   const service = parseService(args["--service"])
+  const partIndexArg = args["--part-index"]
+  const partIndex = partIndexArg != null ? Number(partIndexArg) : undefined
+  const bridge = createBridge()
   await react({
     to,
     guid,
     type,
     service: service === "auto" ? undefined : service,
     region: args["--region"],
-  })
+    partIndex,
+  }, bridge)
 
   output({ status: "reacted", type }, `Sent ${type} reaction`)
 }

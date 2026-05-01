@@ -19,6 +19,12 @@ export interface Message {
   isFromMe: boolean
   service: string
   attachments: number
+  isAudioMessage: boolean
+  // Tapback metadata. `associatedMessageGuid` has the chat.db `p:N/` part-index
+  // prefix stripped so callers can compare against bare iMessage GUIDs.
+  // Both fields are null on regular (non-tapback) rows.
+  associatedMessageType: number | null
+  associatedMessageGuid: string | null
 }
 
 export interface Attachment {

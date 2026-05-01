@@ -14,17 +14,24 @@ describe("serializeMessage", () => {
     isFromMe: false,
     service: "iMessage",
     attachments: 0,
+    isAudioMessage: false,
+    associatedMessageType: null,
+    associatedMessageGuid: null,
   }
 
   it("produces correct shape with all fields", () => {
     const result = serializeMessage(baseMessage)
     expect(result).toEqual({
       id: 1,
+      rowid: 1,
       chat_id: 10,
       guid: "msg-guid-123",
       reply_to_guid: null,
       sender: "+15551234567",
       is_from_me: false,
+      is_audio_message: false,
+      associated_message_type: null,
+      associated_message_guid: null,
       text: "Hello, world!",
       created_at: "2024-06-15T12:00:00.000Z",
       attachments: [],

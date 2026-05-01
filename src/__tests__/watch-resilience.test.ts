@@ -26,6 +26,9 @@ function makeMsg(id: number, text: string): Message {
     isFromMe: false,
     service: "iMessage",
     attachments: 0,
+    isAudioMessage: false,
+    associatedMessageType: null,
+    associatedMessageGuid: null,
   }
 }
 

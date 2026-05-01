@@ -56,6 +56,7 @@ export function open(path = DEFAULT_PATH) {
       if (t) text = t
     }
 
+    const isTapback = row.assocType != null && row.assocType >= 2000 && row.assocType <= 3006
     return {
       id: row.id,
       chatId,
@@ -67,6 +68,11 @@ export function open(path = DEFAULT_PATH) {
       isFromMe: !!row.isFromMe,
       service: row.service ?? "",
       attachments: row.attachCount ?? 0,
+      isAudioMessage: !!row.isAudio,
+      // Only populate tapback fields for actual tapback rows. For regular
+      // replies, assoc_message_guid is the parent and goes through replyToGuid.
+      associatedMessageType: isTapback ? Number(row.assocType) : null,
+      associatedMessageGuid: isTapback ? stripPartPrefix(row.assocGuid) : null,
     }
   }
 
@@ -244,11 +250,12 @@ export function open(path = DEFAULT_PATH) {
     return [...new Set(handles)]
   }
 
-  function messages(chatId: number, opts: { limit?: number; filter?: Filter } = {}): Message[] {
+  function messages(chatId: number, opts: { limit?: number; filter?: Filter; includeReactions?: boolean } = {}): Message[] {
     const limit = opts.limit ?? 50
     const bindings: any[] = [chatId]
     const filterWhere = applyFilter(opts.filter, bindings)
     bindings.push(limit)
+    const reactionFilter = opts.includeReactions ? "" : schema.noReactions
 
     return db
       .prepare(
@@ -256,14 +263,14 @@ export function open(path = DEFAULT_PATH) {
          FROM message m
          JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
          LEFT JOIN handle h ON m.handle_id = h.ROWID
-         WHERE cmj.chat_id = ?${schema.noReactions}${filterWhere}
+         WHERE cmj.chat_id = ?${reactionFilter}${filterWhere}
          ORDER BY m.date DESC LIMIT ?`
       )
       .all(...bindings)
       .map((row: any) => parseRow(row, chatId))
   }
 
-  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number; filter?: Filter } = {}): Message[] {
+  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number; filter?: Filter; includeReactions?: boolean } = {}): Message[] {
     const limit = opts.limit ?? 100
     const bindings: any[] = [afterRowId]
     let chatWhere = ""
@@ -273,6 +280,7 @@ export function open(path = DEFAULT_PATH) {
     }
     chatWhere += applyFilter(opts.filter, bindings)
     bindings.push(limit)
+    const reactionFilter = opts.includeReactions ? "" : schema.noReactions
 
     return db
       .prepare(
@@ -280,7 +288,7 @@ export function open(path = DEFAULT_PATH) {
          FROM message m
          LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
          LEFT JOIN handle h ON m.handle_id = h.ROWID
-         WHERE m.ROWID > ?${schema.noReactions}${chatWhere}
+         WHERE m.ROWID > ?${reactionFilter}${chatWhere}
          ORDER BY m.date ASC, m.ROWID ASC LIMIT ?`
       )
       .all(...bindings)
@@ -382,4 +390,12 @@ export function extractReplyGuid(guid: string | null, type: number | null): stri
   if (!normalized) return null
   if (type != null && type >= 2000 && type <= 3006) return null
   return normalized
+}
+
+// chat.db prefixes associated_message_guid with a part index ("p:N/") for
+// multi-part messages. Strip it so callers compare against the bare GUID
+// stored on the parent message row.
+export function stripPartPrefix(guid: string | null | undefined): string | null {
+  if (!guid) return null
+  return guid.replace(/^p:\d+\//, "")
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.0 - 2026-05-01
+
+- feat: `--include-reactions` flag on `watch` and `messages` to surface tapback rows (filtered out by default to preserve existing CLI behavior)
+- feat: surface `is_audio_message`, `associated_message_type`, `associated_message_guid` on `Message` and the JSON output
+- feat: emit `rowid` alongside `id` in JSON output as a chat.db-aligned alias
+- fix: `associated_message_guid` is normalized to the bare iMessage GUID (chat.db's `p:N/` part-index prefix is stripped)
+
 ## 2.1.1 - 2026-03-28
 
 - fix: remove redundant worker typing that blocked sends for up to 50s when bridge was stale

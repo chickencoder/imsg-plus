@@ -49,6 +49,9 @@ function makeMessage(id: number, chatId: number): Message {
     isFromMe: false,
     service: "iMessage",
     attachments: 0,
+    isAudioMessage: false,
+    associatedMessageType: null,
+    associatedMessageGuid: null,
   }
 }
 
@@ -86,6 +89,7 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     setTyping: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
     sendVoiceNote: vi.fn().mockResolvedValue(undefined),
+    react: vi.fn().mockResolvedValue(undefined),
     launch: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn(),
     ...bridgeOverrides,
