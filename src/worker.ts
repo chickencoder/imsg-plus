@@ -1,6 +1,7 @@
 import { type QueueDB, type QueueJob } from "./queue.js"
-import { send } from "./send.js"
+import { send, normalize } from "./send.js"
 import type { DB } from "./db.js"
+import type { Bridge } from "./bridge.js"
 
 export interface WorkerOptions {
   /** Milliseconds between queue polls (default: 1000) */
@@ -19,6 +20,11 @@ export interface WorkerOptions {
   onFail?: (job: QueueJob, error: string) => void
   /** AbortSignal to stop the worker */
   signal?: AbortSignal
+  /**
+   * Bridge for jobs that can't go through AppleScript (currently: threaded
+   * replies). When omitted, reply jobs fail with a clear error.
+   */
+  bridge?: Bridge
 }
 
 export async function runWorker(
@@ -57,19 +63,37 @@ export async function runWorker(
     try {
       await opts.beforeSend?.(job)
 
-      await send(
-        {
-          to: job.to ?? undefined,
-          chatId: job.chatId ?? undefined,
-          chatIdentifier: job.chatIdentifier ?? undefined,
-          chatGuid: job.chatGuid ?? undefined,
-          text: job.text ?? undefined,
-          file: job.file ?? undefined,
-          service: job.service,
-          region: job.region,
-        },
-        db
-      )
+      if (job.replyToGuid) {
+        // Threaded replies must go through the dylib bridge — AppleScript's
+        // send dictionary has no thread parameter. File attachments aren't
+        // supported on this path yet (no clear use case in the daemon today).
+        if (job.file) {
+          throw new Error("threaded replies with attachments are not supported yet")
+        }
+        if (!opts.bridge) {
+          throw new Error("threaded reply requires a bridge — run via `imsg-plus rpc` (gateway), not standalone `worker`")
+        }
+        const recipient = job.to
+          ? normalize(job.to, job.region)
+          : (job.chatIdentifier ?? job.chatGuid ?? "")
+        if (!recipient) throw new Error("threaded reply requires --to (or chat identifier)")
+        const service = job.service === "sms" ? "sms" : "imessage"
+        await opts.bridge.sendReply(recipient, job.text ?? "", job.replyToGuid, service)
+      } else {
+        await send(
+          {
+            to: job.to ?? undefined,
+            chatId: job.chatId ?? undefined,
+            chatIdentifier: job.chatIdentifier ?? undefined,
+            chatGuid: job.chatGuid ?? undefined,
+            text: job.text ?? undefined,
+            file: job.file ?? undefined,
+            service: job.service,
+            region: job.region,
+          },
+          db
+        )
+      }
 
       opts.afterSend?.(job)
       queue.complete(job.id)

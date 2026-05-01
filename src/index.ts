@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { open, type DB } from "./db.js"
-import { send, sendVoiceNote, react, cleanStagedAttachments, type TapbackType } from "./send.js"
+import { send, sendVoiceNote, react, normalize, cleanStagedAttachments, type TapbackType } from "./send.js"
 import { watch } from "./watch.js"
 import { createBridge } from "./bridge.js"
 import { serve } from "./rpc.js"
@@ -54,6 +54,7 @@ const args = arg(
     "--poll": Number,
     "--retries": Number,
     "--include-reactions": Boolean,
+    "--reply-to": String,
     "-h": "--help",
     "-V": "--version",
   },
@@ -180,6 +181,19 @@ async function sendCmd() {
       openDB()
     )
     output({ status: "sent", mode: "voice-note" }, "sent")
+    return
+  }
+
+  const replyTo = args["--reply-to"]
+  if (replyTo) {
+    if (args["--file"]) bail("--reply-to is not supported with --file (yet)")
+    if (!args["--text"]) bail("--reply-to requires --text")
+    if (!args["--to"]) bail("--reply-to requires --to")
+    const bridge = createBridge()
+    if (!bridge.available) bail("threaded reply requires the IMCore dylib — run: make build-dylib")
+    const recipient = normalize(args["--to"], args["--region"] ?? "US")
+    await bridge.sendReply(recipient, args["--text"], replyTo, service === "sms" ? "sms" : "imessage")
+    output({ status: "sent", mode: "reply", reply_to: replyTo }, "sent")
     return
   }
 

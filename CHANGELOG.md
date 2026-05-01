@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.0 - 2026-05-01
+
+- feat: `send` RPC now accepts `reply_to` (target message GUID); jobs with it set dispatch through the dylib bridge as threaded replies. AppleScript can't thread, so this requires the IMCore dylib (and a `send_reply` handler in the dylib — see IMsgHelper/IMsgInjected.m for the existing pattern used by `react`/`send_voice_note`).
+- feat: `imsg-plus send --reply-to <guid> --to <handle> --text <text>` for one-shot threaded replies via CLI.
+- feat: `bridge.sendReply(handle, text, replyToGuid, service?)` and corresponding `worker` integration; reply jobs without an available bridge fail with a clear error rather than silently ignoring threading.
+- chore: queue.db jobs table gains a `reply_to_guid` column; older queues are migrated in-place via `ALTER TABLE`.
+
 ## 2.2.0 - 2026-05-01
 
 - feat: `--include-reactions` flag on `watch` and `messages` to surface tapback rows (filtered out by default to preserve existing CLI behavior)

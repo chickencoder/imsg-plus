@@ -21,6 +21,10 @@ export interface QueueJob {
   file: string | null
   service: Service
   region: string
+  // GUID of the parent message when sending a threaded reply. AppleScript
+  // can't thread, so jobs with this set have to dispatch through the dylib
+  // bridge (workers without bridge access will fail them with a clear error).
+  replyToGuid: string | null
 }
 
 export type QueueDB = ReturnType<typeof openQueue>
@@ -56,10 +60,17 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
     )
   `)
 
+  // Migrate older queue.db files that pre-date the reply-threading column.
+  // sqlite has no IF NOT EXISTS for ADD COLUMN, so probe pragma first.
+  const cols = new Set<string>(
+    (db.prepare("PRAGMA table_info(jobs)").all() as Array<{ name: string }>).map((r) => r.name),
+  )
+  if (!cols.has("reply_to_guid")) db.exec(`ALTER TABLE jobs ADD COLUMN reply_to_guid TEXT`)
+
   const stmts = {
     insert: db.prepare(`
-      INSERT INTO jobs (idempotency_key, "to", chat_id, chat_identifier, chat_guid, text, file, service, region, max_attempts)
-      VALUES (@idempotencyKey, @to, @chatId, @chatIdentifier, @chatGuid, @text, @file, @service, @region, @maxAttempts)
+      INSERT INTO jobs (idempotency_key, "to", chat_id, chat_identifier, chat_guid, text, file, service, region, max_attempts, reply_to_guid)
+      VALUES (@idempotencyKey, @to, @chatId, @chatIdentifier, @chatGuid, @text, @file, @service, @region, @maxAttempts, @replyToGuid)
     `),
 
     findByKey: db.prepare(`SELECT * FROM jobs WHERE idempotency_key = ?`),
@@ -117,6 +128,7 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
       file: row.file,
       service: row.service as Service,
       region: row.region,
+      replyToGuid: row.reply_to_guid ?? null,
     }
   }
 
@@ -132,6 +144,7 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
       region?: string
       maxAttempts?: number
       idempotencyKey?: string
+      replyToGuid?: string
     }): { job: QueueJob; duplicate: boolean } {
       // Dedup: if a key is provided and already exists, return the existing job
       if (opts.idempotencyKey) {
@@ -150,6 +163,7 @@ export function openQueue(path = DEFAULT_QUEUE_PATH) {
         service: opts.service ?? "auto",
         region: opts.region ?? "US",
         maxAttempts: opts.maxAttempts ?? 3,
+        replyToGuid: opts.replyToGuid ?? null,
       })
       const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(result.lastInsertRowid)
       return { job: rowToJob(row), duplicate: false }

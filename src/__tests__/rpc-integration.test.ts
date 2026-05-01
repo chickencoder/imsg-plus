@@ -89,6 +89,7 @@ function createHarness(dbOverrides: Record<string, any> = {}, bridgeOverrides: R
     setTyping: vi.fn().mockResolvedValue(undefined),
     markRead: vi.fn().mockResolvedValue(undefined),
     sendVoiceNote: vi.fn().mockResolvedValue(undefined),
+    sendReply: vi.fn().mockResolvedValue(undefined),
     react: vi.fn().mockResolvedValue(undefined),
     launch: vi.fn().mockResolvedValue(undefined),
     kill: vi.fn(),

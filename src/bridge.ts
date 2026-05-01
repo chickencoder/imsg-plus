@@ -30,6 +30,7 @@ export function createBridge(customDylib?: string) {
     setTyping,
     markRead,
     sendVoiceNote,
+    sendReply,
     launch,
     kill,
   }
@@ -44,6 +45,25 @@ export function createBridge(customDylib?: string) {
   async function markRead(handle: string): Promise<void> {
     if (!dylibPath) return
     await command("read", { handle })
+  }
+
+  // Throws when unavailable: AppleScript can't thread replies (Messages.app's
+  // sdef has no `thread` parameter on send), so the dylib is the only viable
+  // path. The dylib action constructs an IMMessage with the
+  // threadOriginatorGUID set — same primitive used for tapbacks.
+  async function sendReply(
+    handle: string,
+    text: string,
+    replyToGuid: string,
+    service: "imessage" | "sms" = "imessage",
+  ): Promise<void> {
+    if (!dylibPath) {
+      throw new Error(
+        "threaded reply send requires the IMCore dylib (SIP disabled + " +
+        "imsg-plus-helper.dylib loaded). Run `imsg-plus status` for setup."
+      )
+    }
+    await command("send_reply", { handle, text, reply_to_guid: replyToGuid, service }, 10_000)
   }
 
   // Throws when unavailable: degrading to a plain file send would deliver a

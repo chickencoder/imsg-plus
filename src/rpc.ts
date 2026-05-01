@@ -115,6 +115,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
     reapStaleSecs: 60,
     signal: workerAc.signal,
     log,
+    bridge,
     // Typing is handled by the gateway (typingMode: "instant") — no need to
     // duplicate it here. The old beforeSend typing blocked sends for up to 50s
     // when the bridge was stale.
@@ -287,6 +288,7 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         service: (str(p.service) ?? "auto") as Service,
         region: str(p.region) ?? undefined,
         idempotencyKey: str(p.idempotency_key) ?? undefined,
+        replyToGuid: str(p.reply_to) ?? undefined,
       })
       return { ok: true, queued: true, id: job.id, duplicate }
     },
