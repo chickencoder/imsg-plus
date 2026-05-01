@@ -771,6 +771,22 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
             return errorResponse(requestId, @"Failed to construct reply IMMessage (init returned nil)");
         }
 
+        // Belt-and-braces: some IMMessage initializers accept threadIdentifier
+        // as a parameter but don't actually persist it (the param is consumed
+        // by an internal path that requires additional context). Setting it
+        // explicitly after init guarantees `_threadIdentifier` is populated
+        // before [chat sendMessage:] hands the message to imagent.
+        SEL setThreadSel = @selector(setThreadIdentifier:);
+        if ([message respondsToSelector:setThreadSel]) {
+            [message performSelector:setThreadSel withObject:threadIdentifier];
+        }
+        NSString *postInitThreadId = nil;
+        SEL getThreadSel = @selector(threadIdentifier);
+        if ([message respondsToSelector:getThreadSel]) {
+            postInitThreadId = [message performSelector:getThreadSel];
+        }
+        NSLog(@"[imsg-plus] send_reply: threadIdentifier=%@ post-init=%@", threadIdentifier, postInitThreadId);
+
         SEL sendSel = @selector(sendMessage:);
         if (![chat respondsToSelector:sendSel]) {
             return errorResponse(requestId, @"Chat does not respond to sendMessage:");
@@ -781,6 +797,7 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
             @"handle": handle,
             @"reply_to_guid": replyToGuid,
             @"thread_identifier": threadIdentifier,
+            @"post_init_thread_identifier": postInitThreadId ?: [NSNull null],
         });
     } @catch (NSException *exception) {
         NSLog(@"[imsg-plus] Exception in send_reply: %@\n%@",
