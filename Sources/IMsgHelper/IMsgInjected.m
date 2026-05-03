@@ -698,21 +698,20 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
 
 #pragma mark - Threaded Reply
 //
-// IMMessage exposes a thread-aware initializer
-// `initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:threadIdentifier:`
-// that sets the message's `_threadIdentifier` ivar at construction time.
-// Once sent via `[chat sendMessage:]`, imagent persists the thread linkage
-// into chat.db's `thread_originator_guid` column, which is how Messages.app
-// renders the bubble as a threaded reply on both ends.
+// Threaded replies (called "inline replies" in IMCore — see
+// IMChat.loadInlineRepliesForThreadIdentifier:threadOriginator:messageGuid:)
+// require BOTH a threadIdentifier (`p:N/<parent-guid>` form, used to derive
+// chat.db's thread_originator_guid + thread_originator_part) AND a
+// threadOriginator (the parent IMMessage object). Setting threadIdentifier
+// alone gets accepted by the IMMessage but imagent silently strips it during
+// send if there's no resolved threadOriginator to anchor against — which is
+// why the v2.3.1 attempt put text on the wire but no thread linkage in
+// either chat.db.
 //
-// `threadIdentifier` is the chat.db `p:N/<guid>` form where N is the part
-// index of the parent message part being replied to. We always reply to part
-// 0 — multi-part bubbles (text + attachments in one balloon) are rare and the
-// public API doesn't surface a partIndex today.
-//
-// Unlike `react`, `send_reply` does NOT need to load the parent message via
-// IMChatHistoryController to build a summary string — the parent GUID alone
-// is enough to thread.
+// Loading the parent via IMChatHistoryController.loadMessageWithGUID:
+// completionBlock: is async, so this handler returns nil to the router and
+// the completion block writes the response via writeResponseToFile().
+// Mirrors handleReact's structure.
 
 static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
@@ -736,106 +735,157 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
         return errorResponse(requestId, @"IMMessage class not found");
     }
 
-    @try {
-        NSString *threadIdentifier = [NSString stringWithFormat:@"p:0/%@", replyToGuid];
-        NSAttributedString *attributedBody = [[NSAttributedString alloc] initWithString:text];
-
-        SEL initSel = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:threadIdentifier:);
-        id message = [IMMessageClass alloc];
-        if (![message respondsToSelector:initSel]) {
-            return errorResponse(requestId,
-                @"IMMessage missing initWithSender:...:threadIdentifier: selector — macOS may need a different signature");
-        }
-
-        typedef id (*ReplyInitFn)(id, SEL,
-            id,                  // sender
-            id,                  // time
-            id,                  // text (NSAttributedString)
-            id,                  // messageSubject
-            id,                  // fileTransferGUIDs
-            unsigned long long,  // flags
-            id,                  // error
-            id,                  // guid
-            id,                  // subject
-            id                   // threadIdentifier
-        );
-        ReplyInitFn replyInit = (ReplyInitFn)objc_msgSend;
-        message = replyInit(message, initSel,
-            nil, nil, attributedBody, nil, nil,
-            (unsigned long long)0x5, nil,
-            nil, nil,
-            threadIdentifier
-        );
-
-        if (!message) {
-            return errorResponse(requestId, @"Failed to construct reply IMMessage (init returned nil)");
-        }
-
-        // Diagnostic: capture threadIdentifier state at three points to
-        // localize where threading is being lost.
-        NSMutableArray<NSString *> *trace = [NSMutableArray array];
-        SEL getThreadSel = @selector(threadIdentifier);
-        if ([message respondsToSelector:getThreadSel]) {
-            NSString *afterInit = [message performSelector:getThreadSel];
-            [trace addObject:[NSString stringWithFormat:@"after-init=%@", afterInit ?: @"<nil>"]];
-        }
-
-        SEL setThreadSel = @selector(setThreadIdentifier:);
-        if ([message respondsToSelector:setThreadSel]) {
-            [message performSelector:setThreadSel withObject:threadIdentifier];
-        }
-        if ([message respondsToSelector:getThreadSel]) {
-            NSString *afterSetter = [message performSelector:getThreadSel];
-            [trace addObject:[NSString stringWithFormat:@"after-setter=%@", afterSetter ?: @"<nil>"]];
-        }
-
-        // Try the private ivar directly via KVC as a fallback.
-        @try {
-            [message setValue:threadIdentifier forKey:@"_threadIdentifier"];
-        } @catch (__unused NSException *kvcEx) {}
-        if ([message respondsToSelector:getThreadSel]) {
-            NSString *afterKvc = [message performSelector:getThreadSel];
-            [trace addObject:[NSString stringWithFormat:@"after-kvc=%@", afterKvc ?: @"<nil>"]];
-        }
-
-        NSString *traceStr = [trace componentsJoinedByString:@" | "];
-        NSLog(@"[imsg-plus] send_reply trace: %@", traceStr);
-
-        // Append diagnostic next to the existing IPC files in the
-        // Messages.app container — /tmp is redirected/blocked by the sandbox
-        // and NSLog from a dylib injected into Messages.app gets swallowed.
-        NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"imsg-plus-send-reply.log"];
-        NSString *logLine = [NSString stringWithFormat:@"%@ guid=%@ %@\n",
-            [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
-            replyToGuid, traceStr];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
-            [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-        }
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        }
-
-        SEL sendSel = @selector(sendMessage:);
-        if (![chat respondsToSelector:sendSel]) {
-            return errorResponse(requestId, @"Chat does not respond to sendMessage:");
-        }
-        [chat performSelector:sendSel withObject:message];
-
-        return successResponse(requestId, @{
-            @"handle": handle,
-            @"reply_to_guid": replyToGuid,
-            @"thread_identifier": threadIdentifier,
-            @"trace": traceStr,
-        });
-    } @catch (NSException *exception) {
-        NSLog(@"[imsg-plus] Exception in send_reply: %@\n%@",
-              exception.reason, exception.callStackSymbols);
-        return errorResponse(requestId,
-            [NSString stringWithFormat:@"send_reply failed: %@", exception.reason]);
+    Class historyClass = NSClassFromString(@"IMChatHistoryController");
+    if (!historyClass) {
+        return errorResponse(requestId, @"IMChatHistoryController class not found");
     }
+    id historyController = [historyClass performSelector:@selector(sharedInstance)];
+    if (!historyController) {
+        return errorResponse(requestId, @"Could not get IMChatHistoryController instance");
+    }
+    SEL loadSel = @selector(loadMessageWithGUID:completionBlock:);
+    if (![historyController respondsToSelector:loadSel]) {
+        return errorResponse(requestId, @"loadMessageWithGUID:completionBlock: not available");
+    }
+
+    NSString *threadIdentifier = [NSString stringWithFormat:@"p:0/%@", replyToGuid];
+
+    NSMethodSignature *loadSig = [historyController methodSignatureForSelector:loadSel];
+    NSInvocation *loadInv = [NSInvocation invocationWithMethodSignature:loadSig];
+    [loadInv setSelector:loadSel];
+    [loadInv setTarget:historyController];
+    [loadInv setArgument:&replyToGuid atIndex:2];
+
+    void (^completionBlock)(id) = ^(id parentMessage) {
+        @autoreleasepool {
+            NSMutableArray<NSString *> *trace = [NSMutableArray array];
+            [trace addObject:[NSString stringWithFormat:@"parent=%@",
+                              parentMessage ? NSStringFromClass([parentMessage class]) : @"<nil>"]];
+
+            if (!parentMessage) {
+                writeResponseToFile(errorResponse(requestId,
+                    [NSString stringWithFormat:@"Reply-to message not found in local chat.db: %@", replyToGuid]));
+                return;
+            }
+
+            @try {
+                NSAttributedString *attributedBody = [[NSAttributedString alloc] initWithString:text];
+
+                // Use the long thread-aware init: messageSummaryInfo + threadIdentifier
+                // is the same flavor IMChat's reply UI uses (see the existence of
+                // initWithSender:...:messageSummaryInfo:threadIdentifier:).
+                SEL initSel = @selector(initWithSender:time:text:messageSubject:fileTransferGUIDs:flags:error:guid:subject:associatedMessageGUID:associatedMessageType:associatedMessageRange:messageSummaryInfo:threadIdentifier:);
+                id message = [IMMessageClass alloc];
+                if (![message respondsToSelector:initSel]) {
+                    writeResponseToFile(errorResponse(requestId,
+                        @"IMMessage missing initWithSender:...:messageSummaryInfo:threadIdentifier: selector"));
+                    return;
+                }
+
+                typedef id (*ReplyInitFn)(id, SEL,
+                    id,                  // sender
+                    id,                  // time
+                    id,                  // text (NSAttributedString)
+                    id,                  // messageSubject
+                    id,                  // fileTransferGUIDs
+                    unsigned long long,  // flags
+                    id,                  // error
+                    id,                  // guid
+                    id,                  // subject
+                    id,                  // associatedMessageGUID  (nil — this is a reply, not a tapback)
+                    long long,           // associatedMessageType  (0)
+                    NSRange,             // associatedMessageRange (zero)
+                    id,                  // messageSummaryInfo     (nil — Messages.app fills it)
+                    id                   // threadIdentifier
+                );
+                ReplyInitFn replyInit = (ReplyInitFn)objc_msgSend;
+                message = replyInit(message, initSel,
+                    nil, nil, attributedBody, nil, nil,
+                    (unsigned long long)0x5, nil,
+                    nil, nil,
+                    nil, 0, NSMakeRange(0, 0),
+                    nil,
+                    threadIdentifier
+                );
+
+                if (!message) {
+                    writeResponseToFile(errorResponse(requestId, @"Failed to construct reply IMMessage (init returned nil)"));
+                    return;
+                }
+
+                // Belt-and-braces: explicitly set threadIdentifier and
+                // threadOriginator post-init. The init param doesn't always
+                // stick (v2.3.1 with the shorter init left _threadIdentifier
+                // populated but imagent stripped it on send because
+                // _threadOriginator was nil).
+                SEL setThreadIdSel = @selector(setThreadIdentifier:);
+                if ([message respondsToSelector:setThreadIdSel]) {
+                    [message performSelector:setThreadIdSel withObject:threadIdentifier];
+                }
+                SEL setThreadOrigSel = @selector(setThreadOriginator:);
+                if ([message respondsToSelector:setThreadOrigSel]) {
+                    [message performSelector:setThreadOrigSel withObject:parentMessage];
+                }
+
+                NSString *postThreadId = [message respondsToSelector:@selector(threadIdentifier)]
+                    ? [message performSelector:@selector(threadIdentifier)] : nil;
+                id postThreadOrig = [message respondsToSelector:@selector(threadOriginator)]
+                    ? [message performSelector:@selector(threadOriginator)] : nil;
+                [trace addObject:[NSString stringWithFormat:@"threadId=%@", postThreadId ?: @"<nil>"]];
+                [trace addObject:[NSString stringWithFormat:@"threadOrig=%@",
+                                  postThreadOrig ? NSStringFromClass([postThreadOrig class]) : @"<nil>"]];
+
+                NSString *traceStr = [trace componentsJoinedByString:@" | "];
+                NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"imsg-plus-send-reply.log"];
+                NSString *logLine = [NSString stringWithFormat:@"%@ guid=%@ %@\n",
+                    [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
+                    replyToGuid, traceStr];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+                    [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+                }
+                NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+                if (fh) {
+                    [fh seekToEndOfFile];
+                    [fh writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
+                    [fh closeFile];
+                }
+
+                SEL sendSel = @selector(sendMessage:);
+                if (![chat respondsToSelector:sendSel]) {
+                    writeResponseToFile(errorResponse(requestId, @"Chat does not respond to sendMessage:"));
+                    return;
+                }
+                [chat performSelector:sendSel withObject:message];
+
+                writeResponseToFile(successResponse(requestId, @{
+                    @"handle": handle,
+                    @"reply_to_guid": replyToGuid,
+                    @"thread_identifier": threadIdentifier,
+                    @"trace": traceStr,
+                }));
+            } @catch (NSException *exception) {
+                NSLog(@"[imsg-plus] Exception in send_reply completion: %@\n%@",
+                      exception.reason, exception.callStackSymbols);
+                writeResponseToFile(errorResponse(requestId,
+                    [NSString stringWithFormat:@"send_reply failed: %@", exception.reason]));
+            }
+        }
+    };
+
+    [loadInv setArgument:&completionBlock atIndex:3];
+    [loadInv invoke];
+
+    // Safety net: if the load completion never fires within 5s, write a
+    // timeout response so the worker doesn't hang.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        NSData *responseData = [NSData dataWithContentsOfFile:kResponseFile];
+        if (!responseData || responseData.length < 3) {
+            writeResponseToFile(errorResponse(requestId,
+                [NSString stringWithFormat:@"Timeout: parent message GUID not found or completion never fired: %@", replyToGuid]));
+        }
+    });
+
+    return nil; // async — completion writes the response
 }
 
 #pragma mark - Command Router
