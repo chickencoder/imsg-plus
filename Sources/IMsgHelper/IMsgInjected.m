@@ -773,10 +773,6 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
 
     void (^completionBlock)(id) = ^(id parentMessage) {
         @autoreleasepool {
-            NSMutableArray<NSString *> *trace = [NSMutableArray array];
-            [trace addObject:[NSString stringWithFormat:@"parent=%@",
-                              parentMessage ? NSStringFromClass([parentMessage class]) : @"<nil>"]];
-
             if (!parentMessage) {
                 writeResponseToFile(errorResponse(requestId,
                     [NSString stringWithFormat:@"Reply-to message not found in local chat.db: %@", replyToGuid]));
@@ -812,9 +808,6 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
                 } else if (items) {
                     partItem = items;
                 }
-                [trace addObject:[NSString stringWithFormat:@"partItem=%@",
-                                  partItem ? NSStringFromClass([partItem class]) : @"<nil>"]];
-
                 if (!partItem) {
                     writeResponseToFile(errorResponse(requestId,
                         @"Could not find IMMessagePartChatItem on parent message"));
@@ -834,8 +827,6 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
                 }
 
                 NSString *encodedThreadId = createThreadId(partItem);
-                [trace addObject:[NSString stringWithFormat:@"encodedThreadId=%@",
-                                  encodedThreadId ?: @"<nil>"]];
                 if (!encodedThreadId) {
                     writeResponseToFile(errorResponse(requestId,
                         @"IMCreateThreadIdentifierForMessagePartChatItem returned nil"));
@@ -875,25 +866,6 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
                 if ([message respondsToSelector:setThreadIdSel]) {
                     [message performSelector:setThreadIdSel withObject:encodedThreadId];
                 }
-                NSString *postThreadId = [message respondsToSelector:@selector(threadIdentifier)]
-                    ? [message performSelector:@selector(threadIdentifier)] : nil;
-                [trace addObject:[NSString stringWithFormat:@"finalThreadId=%@",
-                                  postThreadId ?: @"<nil>"]];
-
-                NSString *traceStr = [trace componentsJoinedByString:@" | "];
-                NSString *logPath = [NSHomeDirectory() stringByAppendingPathComponent:@"imsg-plus-send-reply.log"];
-                NSString *logLine = [NSString stringWithFormat:@"%@ guid=%@ %@\n",
-                    [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
-                    replyToGuid, traceStr];
-                if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
-                    [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
-                }
-                NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-                if (fh) {
-                    [fh seekToEndOfFile];
-                    [fh writeData:[logLine dataUsingEncoding:NSUTF8StringEncoding]];
-                    [fh closeFile];
-                }
 
                 SEL sendSel = @selector(sendMessage:);
                 if (![chat respondsToSelector:sendSel]) {
@@ -906,7 +878,6 @@ static NSDictionary* handleSendReply(NSInteger requestId, NSDictionary *params) 
                     @"handle": handle,
                     @"reply_to_guid": replyToGuid,
                     @"thread_identifier": encodedThreadId,
-                    @"trace": traceStr,
                 }));
             } @catch (NSException *exception) {
                 NSLog(@"[imsg-plus] Exception in send_reply completion: %@\n%@",
